@@ -8,8 +8,17 @@ graphical interface.
 
 ## Installation
 
-For the easiest setup, just download this project and run the launcher for your
-computer:
+For the easiest setup, download this project as a ZIP from GitHub, then run
+the launcher for your computer:
+
+1. Open the GitHub project page.
+2. Click **Code**.
+3. Click **Download ZIP**.
+4. Unzip the downloaded folder.
+
+![Where to find Download ZIP on GitHub](docs/github-download-zip-location.png)
+
+Then:
 
 - Windows: unzip the downloaded folder, then double-click `run_windows.bat`.
   The first run will install any missing tools for you.
