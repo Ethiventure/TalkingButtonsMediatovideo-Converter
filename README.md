@@ -6,6 +6,19 @@ combining camera `.media` clips into usable video files. It expands the
 with folder-aware grouping, validation, progress reporting, cancellation, and a
 graphical interface.
 
+## Installation
+
+For the easiest setup, just download this project and run the launcher for your
+computer:
+
+- Windows: unzip the downloaded folder, then double-click `run_windows.bat`.
+  The first run will install any missing tools for you.
+- macOS: unzip the downloaded folder, then double-click `run_macos.command`.
+  The first run will install any missing tools for you.
+
+If your Mac asks whether to open the file, choose Open. If Windows shows a
+security warning, choose Run anyway.
+
 ## Real application screenshots
 
 These are screenshots of the actual macOS application, not interface renders.
