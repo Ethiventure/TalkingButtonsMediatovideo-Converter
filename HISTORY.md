@@ -129,3 +129,7 @@ project history.
 - Full packaged recovery validation found no detached-helper result despite passing direct helper tests.
 - Added startup-output retention and an exact production-launch test, covering an empty PATH, apostrophes in paths, and empty optional arguments.
 - Retained this diagnostic evidence before choosing the corrective change; did not increase the recovery deadlines.
+
+### Version 0.4.2 Windows launch isolation
+
+- The exact production-launch test reproduced an absent result and empty startup log. Added bounded native probes comparing argument transport, environment, and console flags, with marker controls and cleanup of every fixture child.

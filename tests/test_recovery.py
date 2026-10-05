@@ -1092,6 +1092,55 @@ class SwapHelperTests(RecoveryTestCase):
         self.assertTrue(recovery._recovery_pid_alive(os.getpid()))
         self.assertFalse(recovery._recovery_pid_alive(2147483646))
 
+    @unittest.skipUnless(sys.platform == "win32", "native Windows launch diagnosis")
+    def test_windows_launch_diagnostic_matrix(self) -> None:
+        """Record bounded controls for argv, environment and process flags."""
+        full = dict(os.environ)
+        minimal = {"PATH": "", "HOME": str(self.root), "USERPROFILE": str(self.root),
+                   "LOCALAPPDATA": str(self.cache), "TEMP": str(self.root),
+                   "TMP": str(self.root), "SystemRoot": os.environ["SystemRoot"]}
+        names = ("ParentPid", "Candidate", "Target", "Backup", "LogPath",
+                 "ResultPath", "LockPath", "WaitSeconds", "Relaunch", "RelaunchCommand")
+        cases = [(env, flags, shape, False) for env in ("full", "minimal")
+                 for flags in ("regular", "detached") for shape in ("raw", "named", "marker")]
+        cases.append(("minimal", "detached", "raw", True))
+        outcomes = []
+        for index, (env_name, flags_name, shape, noninteractive) in enumerate(cases):
+            folder = self.root / f"matrix {index}'s fixture"
+            folder.mkdir()
+            target, candidate, backup = (folder / name for name in ("target", "candidate", "backup"))
+            target.mkdir(); candidate.mkdir()
+            result, lock = folder / "result.json", folder / "lock"
+            helper = recovery._recovery_write_helper(folder, relaunch=False)
+            arguments = ["2147483646", str(candidate), str(target), str(backup), "",
+                         str(result), str(lock), "3", "0", str(target / "app.exe")]
+            if shape == "marker":
+                helper.write_text('param([string]$Marker)\n[System.IO.File]::WriteAllText($Marker, "ok")\n', encoding="utf-8")
+                arguments = [str(result)]
+            elif shape == "named":
+                arguments = [value for pair in zip(("-" + name for name in names), arguments) for value in pair]
+            environment = dict(full if env_name == "full" else minimal)
+            environment.update(RECOVERY_RESULT_TARGET_JSON=json.dumps(str(target)),
+                               RECOVERY_RESULT_BACKUP_JSON=json.dumps(str(backup)))
+            command = [str(recovery._recovery_windows_powershell()), "-NoProfile", "-ExecutionPolicy", "Bypass"]
+            if noninteractive:
+                command.append("-NonInteractive")
+            command += ["-File", str(helper), *arguments]
+            log = folder / "startup.log"
+            with log.open("wb") as output:
+                child = subprocess.Popen(command, env=environment, stdin=subprocess.DEVNULL,
+                                         stdout=output, stderr=output,
+                                         creationflags=0x208 if flags_name == "detached" else 0)
+                try:
+                    status = child.wait(timeout=8)
+                except subprocess.TimeoutExpired:
+                    status = "timeout"
+                    child.kill(); child.wait(timeout=5)
+            outcomes.append(dict(env=env_name, flags=flags_name, shape=shape,
+                                 noninteractive=noninteractive, status=status,
+                                 result=result.is_file(), output=log.read_text(errors="replace")))
+        print("WINDOWS_LAUNCH_MATRIX " + json.dumps(outcomes), flush=True)
+
     @unittest.skipUnless(sys.platform == "win32", "native detached Windows launcher")
     def test_windows_production_launcher_with_minimal_environment(self) -> None:
         """Exercise the actual raw argv and detached launch with hostile paths."""
@@ -1119,8 +1168,30 @@ class SwapHelperTests(RecoveryTestCase):
         arguments = ["2147483646", str(candidate), str(target), str(backup), "",
                      str(result), str(lock), "3", "0", str(target / "app.exe")]
         startup = result.with_suffix(".helper-startup.log")
+        children = []
+        real_popen = subprocess.Popen
+
+        def cleanup():
+            """Reap fixture children even when startup raises an exception."""
+            for child in children:
+                try:
+                    child.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    child.kill()
+                    child.wait(timeout=5)
+
+        self.addCleanup(cleanup)
+
+        def launch(*args, **kwargs):
+            """Retain the fixture child so a failed test cannot orphan it."""
+            child = real_popen(*args, **kwargs)
+            children.append(child)
+            return child
+
         try:
-            with mock.patch.dict(os.environ, environment, clear=True):
+            with mock.patch.dict(os.environ, environment, clear=True), mock.patch.object(
+                recovery.subprocess, "Popen", side_effect=launch
+            ):
                 recovery._recovery_launch_helper(helper, arguments)
         except OSError as error:
             self.fail(f"{error}\n{startup.read_text(errors='replace')}")
