@@ -103,3 +103,8 @@ project history.
   that LaunchServices does not pass command-line arguments to AppleScript run handlers.
 - Added exact Windows Fix automatically/Close labels and native dialog transport
   checks alongside the complete-package recovery harness.
+
+### Version 0.4.2 cross-platform test fixture validation
+
+- Matched recovery fixtures to each platform's packaged layout and executable suffix, after Ubuntu CI exposed macOS-only assumptions.
+- Exercised the POSIX helper directly on Linux and retained native Windows PowerShell/dialog checks. The production application code is unchanged.

@@ -24,6 +24,12 @@ from mediatovideo_converter import recovery
 
 REAL_CACHE_DIRECTORY = recovery._recovery_cache_directory
 
+IS_MACOS = sys.platform == "darwin"
+TOOL_SUFFIX = ".exe" if sys.platform == "win32" else ""
+BUNDLE_DIRECTORY_NAME = (
+    "Mediatovideo Converter.app" if IS_MACOS else "Mediatovideo Converter"
+)
+
 CANONICAL_FAILURE = (
     "Stage: Checking packaged video tools\n\n"
     "Problem: The packaged FFmpeg and FFprobe tools are missing or incomplete.\n"
@@ -46,7 +52,7 @@ class RecoveryTestCase(unittest.TestCase):
         self.cache.mkdir()
         self.patch(mock.patch.object(recovery, "_recovery_cache_directory", lambda: self.cache))
         self.patch(mock.patch.object(recovery, "_recovery_is_frozen", lambda: True))
-        self.app = self.make_bundle(self.root / "Mediatovideo Converter.app")
+        self.app = self.make_bundle(self.root / BUNDLE_DIRECTORY_NAME)
         self.patch(mock.patch.object(recovery, "_recovery_target_path", lambda: self.app))
         self.patch(mock.patch.object(recovery, "_recovery_codesign_verify", lambda _root: (True, "signed")))
 
@@ -58,37 +64,68 @@ class RecoveryTestCase(unittest.TestCase):
     def make_bundle(self, app: Path, *, ffmpeg_bytes: bytes = b"ffmpeg-binary") -> Path:
         """Create a bundle directory with a manifest and video tools."""
 
-        tools = app / "Contents" / "Frameworks" / "video_tools"
+        if IS_MACOS:
+            tools = app / "Contents" / "Frameworks" / "video_tools"
+            manifest_path = app / "Contents" / "Resources" / "BUILD-MANIFEST.json"
+            executable = app / "Contents" / "MacOS" / "Mediatovideo Converter"
+        else:
+            # The module's non-macOS layout: manifest at the bundle root, the
+            # tools under _internal, and a root-level executable.
+            tools = app / "_internal" / "video_tools"
+            manifest_path = app / "BUILD-MANIFEST.json"
+            executable = app / "Mediatovideo Converter.exe"
         tools.mkdir(parents=True)
-        (tools / "ffmpeg").write_bytes(ffmpeg_bytes)
-        (tools / "ffprobe").write_bytes(b"ffprobe-binary")
-        resources = app / "Contents" / "Resources"
-        resources.mkdir(parents=True)
-        (app / "Contents" / "MacOS").mkdir()
-        (app / "Contents" / "MacOS" / "Mediatovideo Converter").write_bytes(b"exe")
+        ffmpeg_file = tools / f"ffmpeg{TOOL_SUFFIX}"
+        ffprobe_file = tools / f"ffprobe{TOOL_SUFFIX}"
+        ffmpeg_file.write_bytes(ffmpeg_bytes)
+        ffprobe_file.write_bytes(b"ffprobe-binary")
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        executable.parent.mkdir(parents=True, exist_ok=True)
+        executable.write_bytes(b"exe")
         # This is the real build manifest shape: packaged digests live in
         # "hashes" and the "tools" object carries the version report.
         manifest = {
             "application": {"name": "Mediatovideo Converter", "version": recovery.__version__},
             "build": {"platform": sys.platform, "machine": recovery.platform.machine()},
             "hashes": {
-                "ffmpeg": sha256(tools / "ffmpeg"),
-                "ffprobe": sha256(tools / "ffprobe"),
+                "ffmpeg": sha256(ffmpeg_file),
+                "ffprobe": sha256(ffprobe_file),
             },
             "tools": {
                 "ffmpeg": {"version": "8.1.2", "banner": "ffmpeg version 8.1.2"},
                 "ffprobe": {"version": "8.1.2"},
             },
         }
-        (resources / "BUILD-MANIFEST.json").write_text(json.dumps(manifest), encoding="utf-8")
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
         return app
+
+    def tools_directory(self) -> Path:
+        """Return the video-tools folder for this platform's bundle layout."""
+        if IS_MACOS:
+            return self.app / "Contents" / "Frameworks" / "video_tools"
+        return self.app / "_internal" / "video_tools"
+
+    def manifest_file(self) -> Path:
+        """Return the manifest path for this platform's bundle layout."""
+        if IS_MACOS:
+            return self.app / "Contents" / "Resources" / "BUILD-MANIFEST.json"
+        return self.app / "BUILD-MANIFEST.json"
+
+    def archive_manifest_member(self) -> str:
+        """Return the in-archive manifest path for this platform's layout."""
+        prefix = (
+            "Mediatovideo Converter.app/Contents/Resources"
+            if IS_MACOS
+            else "Mediatovideo Converter"
+        )
+        return f"{prefix}/BUILD-MANIFEST.json"
 
     def seed_cache(self, *, archive_name: str = "mediatovideo-recovery.zip") -> Path:
         """Write a valid archive and matching metadata into the test cache."""
 
         archive = self.cache / archive_name
         with zipfile.ZipFile(archive, "w") as handle:
-            handle.writestr("Mediatovideo Converter.app/Contents/Resources/BUILD-MANIFEST.json", "{}")
+            handle.writestr(self.archive_manifest_member(), "{}")
         metadata = {
             "schema": recovery.RECOVERY_METADATA_SCHEMA,
             **recovery._recovery_identity(),
@@ -134,7 +171,7 @@ class CacheValidationTests(RecoveryTestCase):
         )
 
         self.assertTrue(matches, detail)
-        (self.app / "Contents" / "Frameworks" / "video_tools" / "ffmpeg").write_bytes(b"tampered")
+        (self.tools_directory() / f"ffmpeg{TOOL_SUFFIX}").write_bytes(b"tampered")
         matches, _detail = recovery._recovery_tool_hashes(
             manifest, recovery._recovery_tools_root(self.app)  # type: ignore[arg-type]
         )
@@ -209,6 +246,7 @@ class ArchiveAuditTests(RecoveryTestCase):
         self.assertFalse(ok)
         self.assertIn("repeats", detail)
 
+    @unittest.skipIf(sys.platform == "win32", "symlinks are rejected wholesale on Windows")
     def test_symlink_escape_and_symlinked_ancestor_are_rejected(self) -> None:
         def escape(handle: zipfile.ZipFile) -> None:
             info = zipfile.ZipInfo("App.app/link")
@@ -229,6 +267,7 @@ class ArchiveAuditTests(RecoveryTestCase):
         self.assertFalse(ok)
         self.assertIn("symlinked directory", detail)
 
+    @unittest.skipIf(sys.platform == "win32", "symlinks are rejected wholesale on Windows")
     def test_internal_parent_symlink_is_allowed_in_any_order(self) -> None:
         def writer(handle: zipfile.ZipFile) -> None:
             # A real PyInstaller app links Resources/x -> ../../Frameworks/x,
@@ -242,6 +281,7 @@ class ArchiveAuditTests(RecoveryTestCase):
 
         self.assertTrue(ok, detail)
 
+    @unittest.skipIf(sys.platform == "win32", "symlinks are rejected wholesale on Windows")
     def test_prefix_attack_is_order_independent(self) -> None:
         def writer(handle: zipfile.ZipFile) -> None:
             # The file appears first, then the directory symlink that would
@@ -326,7 +366,6 @@ class CanOfferTests(RecoveryTestCase):
 class SeedTests(RecoveryTestCase):
     """Seeding verifies the source bundle and never overwrites a valid cache."""
 
-    @unittest.skipIf(sys.platform != "darwin", "ditto archive creation is macOS only")
     def test_seed_creates_a_valid_cache(self) -> None:
         result = recovery.recovery_seed()
 
@@ -334,11 +373,10 @@ class SeedTests(RecoveryTestCase):
         valid, detail, _metadata = recovery._recovery_cache_status()
         self.assertTrue(valid, detail)
 
-    @unittest.skipIf(sys.platform != "darwin", "ditto archive creation is macOS only")
     def test_damaged_app_does_not_replace_a_valid_cache(self) -> None:
         self.assertTrue(recovery.recovery_seed()["ok"])
         original_digest = recovery._recovery_cache_status()[2]["archive_sha256"]
-        (self.app / "Contents" / "Frameworks" / "video_tools" / "ffmpeg").write_bytes(b"damaged")
+        (self.tools_directory() / f"ffmpeg{TOOL_SUFFIX}").write_bytes(b"damaged")
 
         second = recovery.recovery_seed()
 
@@ -346,7 +384,7 @@ class SeedTests(RecoveryTestCase):
         self.assertEqual(recovery._recovery_cache_status()[2]["archive_sha256"], original_digest)
 
     def test_tool_hash_mismatch_refuses_to_seed(self) -> None:
-        (self.app / "Contents" / "Frameworks" / "video_tools" / "ffmpeg").write_bytes(b"damaged")
+        (self.tools_directory() / f"ffmpeg{TOOL_SUFFIX}").write_bytes(b"damaged")
 
         result = recovery.recovery_seed()
 
@@ -355,7 +393,7 @@ class SeedTests(RecoveryTestCase):
         self.assertFalse(recovery._recovery_cache_status()[0])
 
     def test_missing_manifest_refuses_to_seed(self) -> None:
-        (self.app / "Contents" / "Resources" / "BUILD-MANIFEST.json").unlink()
+        self.manifest_file().unlink()
 
         result = recovery.recovery_seed()
 
@@ -433,7 +471,11 @@ class StartTests(RecoveryTestCase):
         arguments = launched["args"]
         # Raw argv: no quotes anywhere, the candidate is the staged bundle
         # itself (not the container), and no trailing quote characters leak in.
-        self.assertIn("no", arguments)
+        if IS_MACOS:
+            self.assertIn("no", arguments)
+            self.assertIn("/usr/bin/open", arguments)
+        else:
+            self.assertIn("0", arguments)
         self.assertIn(str(self.app), arguments)
         for value in arguments:
             self.assertNotIn("'", value)
@@ -569,6 +611,14 @@ class StartTests(RecoveryTestCase):
 class SwapHelperTests(RecoveryTestCase):
     """The generated shell helper performs the swap, rollback and deadline."""
 
+    def write_posix_helper(self, directory: Path) -> Path:
+        """Write the POSIX helper directly so Ubuntu runs the same script."""
+        directory.mkdir(parents=True, exist_ok=True)
+        helper = directory / "mediatovideo-repair.sh"
+        helper.write_text(recovery._POSIX_HELPER, encoding="utf-8")
+        helper.chmod(0o700)
+        return helper
+
     def run_helper(
         self,
         candidate: Path,
@@ -580,7 +630,7 @@ class SwapHelperTests(RecoveryTestCase):
         lock: Path | None = None,
         relaunch: str = "no",
     ) -> tuple[int, Path, Path, Path]:
-        helper = recovery._recovery_write_helper(self.root / "helper", relaunch=False)
+        helper = self.write_posix_helper(self.root / "helper")
         log = self.root / "helper.log"
         result = self.root / "helper-result.json"
         lock_path = lock or (self.root / "repair.lock")
@@ -663,6 +713,16 @@ class SwapHelperTests(RecoveryTestCase):
         self.assertIn("the original was restored", payload["detail"])
         self.assertIn("restored", log.read_text(encoding="utf-8"))
 
+    @unittest.skipUnless(IS_MACOS, "macOS writes the POSIX helper")
+    def test_write_helper_selects_the_posix_script_on_macos(self) -> None:
+        helper = recovery._recovery_write_helper(self.root / "helper", relaunch=False)
+        self.assertTrue(helper.name.endswith(".sh"))
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows writes the PowerShell helper")
+    def test_write_helper_selects_the_powershell_script_on_windows(self) -> None:
+        helper = recovery._recovery_write_helper(self.root / "helper", relaunch=False)
+        self.assertTrue(helper.name.endswith(".ps1"))
+
     def test_result_detail_never_interpolates_a_path(self) -> None:
         # The JSON detail field is fixed text; only the escaped backup_path
         # field may carry the path, so a quote or backslash cannot break JSON.
@@ -725,7 +785,7 @@ class SwapHelperTests(RecoveryTestCase):
         self.assertEqual(len(backups), 2)
 
     def test_posix_helper_is_self_contained_and_ownership_safe(self) -> None:
-        helper = recovery._recovery_write_helper(self.root / "helper", relaunch=False)
+        helper = self.write_posix_helper(self.root / "helper")
         text = helper.read_text(encoding="utf-8")
 
         self.assertIn("PATH=/usr/bin:/bin", text)
@@ -775,7 +835,7 @@ class SwapHelperTests(RecoveryTestCase):
         candidate.mkdir()
         (candidate / "new.txt").write_text("new", encoding="utf-8")
         lock = self.root / "owner.lock"
-        helper = recovery._recovery_write_helper(self.root / "helper", relaunch=False)
+        helper = self.write_posix_helper(self.root / "helper")
         log = self.root / "own.log"
         result = self.root / "own.json"
         # exec keeps the shell's PID, so the lock written here is owned by the
