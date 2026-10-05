@@ -186,6 +186,7 @@ def make_app(*, viewable: bool = False) -> WEB_UI.MediaToVideoApp:
     app._scan_button = FakeWidget()
     app._convert_button = FakeWidget()
     app._mkv_button = FakeWidget()
+    app._join_button = FakeWidget()
     app._cancel_button = FakeWidget()
     app._groups_table = FakeWidget()
     return app

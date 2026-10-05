@@ -60,6 +60,33 @@ class ScannerTests(unittest.TestCase):
             self.assertEqual(result.groups[0].category, "Event 1")
             self.assertIsNone(result.groups[0].year)
 
+    def test_year_folder_with_suffix_counts_as_year(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "Camera exports" / "2021 video"
+            self._touch_media(root / "09" / "24" / "1632510909_0015" / "0010.media")
+            self._touch_media(root / "12" / "29" / "1640798622_0015" / "0010.media")
+
+            result = scanner_scan(root, GroupingMode.CHILD_FOLDER)
+
+            self.assertEqual(result.unrecognised_date_files, 0)
+            self.assertEqual(result.day_count, 2)
+            self.assertEqual(len(result.groups), 2)
+            self.assertEqual(
+                [(group.year, group.month, group.day) for group in result.groups],
+                [("2021", "09", "24"), ("2021", "12", "29")],
+            )
+            self.assertEqual(result.groups[0].category, "1632510909_0015")
+
+    def test_pure_year_folders_still_work(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "DCIM" / "2026" / "07" / "17"
+            self._touch_media(root / "001.media")
+
+            result = scanner_scan(Path(temporary) / "DCIM", GroupingMode.DAY)
+
+            self.assertEqual(result.unrecognised_date_files, 0)
+            self.assertEqual(result.groups[0].year, "2026")
+
     @staticmethod
     def _touch_media(path: Path) -> None:
         """Create a tiny placeholder clip at ``path``."""

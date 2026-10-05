@@ -6,6 +6,23 @@ combining camera `.media` clips into usable video files. It expands the
 with folder-aware grouping, validation, progress reporting, cancellation, and a
 graphical interface.
 
+This version extends it further for one specific job: editing dog
+talking-button videos (for example a button mat) recorded on a motion camera
+that saves `.media` files. Those cameras pack picture and sound in a way plain
+FFmpeg reads as silent, name their year folders loosely (`2021 video`), and
+produce thousands of short clips — so this version:
+
+- recovers the hidden sound while converting, keeping picture and sound
+  in step;
+- reads year folders with extra words and groups clips by real day and motion
+  event;
+- joins short piece videos back into watchable day videos in shown, fixable
+  time order;
+- adds `scripts/dog_filter.py`, which keeps only the parts where a dog is on
+  screen (review first, originals never change).
+
+Typical workflow: convert by child folder, join the pieces, then filter.
+
 ## Installation
 
 The preferred distribution is a **self-contained native app**. The native build
@@ -143,7 +160,8 @@ restoration of a disposable damaged copy; it never damages your installed app.
 These are screenshots of the actual macOS application, not interface renders.
 The Windows application has the same controls with native Windows styling. The
 screenshots were taken with empty fields and contain no user folders, filenames,
-media, video frames, or photographs.
+media, video frames, or photographs. They predate the **Join videos** button,
+which sits beside the MKV tool in current versions.
 
 ![Actual Mediatovideo Converter main window on macOS](docs/app-screenshot-macos.png)
 
@@ -151,17 +169,29 @@ media, video frames, or photographs.
 
 ## What the application does
 
-Mediatovideo Converter has two workflows:
+Mediatovideo Converter has four workflows:
 
 1. **Folder conversion** recursively finds camera `.media` clips, organises
    them by date and optional child folder, then joins each group into an MKV or
    MP4 video.
 2. **Single-file conversion** takes an existing MKV and creates a compatible
    H.264/AAC MP4.
+3. **Join videos** picks every MP4 or MKV below one folder and copies them
+   into a single video in shown, fixable time order.
+4. **Dog filter** (`scripts/dog_filter.py`, command line) keeps only the parts
+   of a video where a dog is on screen, after your review.
 
 All video processing happens locally with FFmpeg. Nothing is uploaded. The
 first-run installer only uses the internet when a required component is
 missing.
+
+### Example use: talking-button dog videos
+
+If you film a dog with talking buttons (for example a button mat) on a motion
+camera that saves `.media` files, this app turns those clips into watchable
+day videos with sound — and `scripts/dog_filter.py` can then keep only the
+parts where a dog is on screen. Convert by child folder, join the pieces,
+then filter.
 
 ## Folder conversion: step by step
 
@@ -226,6 +256,7 @@ stable full-relative-path order.
 | **2. Convert videos** | Starts conversion only after a successful scan and valid output selection. |
 | **Cancel** | Requests a safe stop for the active scan or conversion. |
 | **MKV → MP4 tool** | Opens the independent single-file converter. |
+| **Join videos** | Opens the folder joiner: picks every MP4 or MKV below a folder, shows the join order (time, original, creation, or hand-fixed), and copies them into one MP4 or MKV. |
 | **Open output folder** | Opens the selected destination in Finder or File Explorer. |
 
 ## Output layout and filenames
@@ -247,15 +278,83 @@ it safely creates `-2`, `-3`, and so on.
 ## MKV or MP4 output
 
 **MKV — fast, lossless stream copy** follows the original Gist. It copies the
-camera streams without decoding or re-encoding, so it is fast and does not lose
-quality. The clips must contain streams and timestamps that FFmpeg can join.
-If stream copy cannot join a group, the app recommends trying MP4.
+camera picture stream without decoding or re-encoding, so it is fast and does
+not lose quality (sound is stored alongside as AAC). The clips must contain
+streams and timestamps that FFmpeg can join. If stream copy cannot join a
+group, the app recommends trying MP4.
 
 **MP4 — compatible H.264 (slower)** decodes and re-encodes the first available
 video and audio streams with H.264 (`libx264`, CRF 20, medium preset) and AAC
 (128 kbit/s). It adds fast-start metadata for easier playback. Re-encoding is
 slower and lossy, but it can handle many clip/timestamp differences that stream
 copy cannot.
+
+LittlelfSmart cameras pack picture (types 0/1) and 8000 Hz 16-bit mono sound
+(type 3) behind 24-byte headers in each `.media` file. FFmpeg alone reads
+these as picture-only, so older versions made silent video. Version 0.3.1
+encodes each clip on its own measured frame rate with its sound, then joins
+the segments — so MKV keeps fast picture copy with AAC sound and MP4 keeps
+H.264 video with AAC sound, in sync across hundreds of clips.
+
+Year folders may carry extra words: `2021 video` counts as year 2021, so
+`2021 video/09/24` is recognised as 2021-09-24 instead of falling into one
+unrecognised pile.
+
+## Joining small videos into big ones
+
+Plain English: convert by child folder first (many short videos in one
+folder — fast, and one bad clip ruins only its own piece), then press
+**Join videos**, pick that folder, check the order list, and join. Time order
+is automatic; **Original order** restores folder order; **Creation order**
+follows file times (use it when names are plain numbers); **Up/Down** fix
+lines by hand. The join copies without re-drawing, so minutes not hours.
+
+Technical: the dialog collects `*.mp4`/`*.mkv` recursively via
+`converter_collect_mp4s`, sorts with `converter_order_time_key`
+(`year, month, day, epoch, filename` from mirror dirs, `MM-DD` stems, and
+embedded 10-digit event epochs), and calls `converter_join_mp4s`, which
+gates on uniform `h264` video plus all-`aac`/all-silent audio before a
+single `concat -c copy +faststart` through the standard atomic-output path.
+Pieces whose names carry no event time (Month-Day naming with `-2`
+collision numbers) can be ordered with **Creation order**, which follows
+file times — do not move or copy pieces first. For meaningful names prefer
+File naming Month-Day-Category. Pieces made with 0.3.1–0.3.2 hold empty
+sound tracks and must be re-converted; joining cannot rescue them.
+
+## Keep only the dog parts
+
+Plain English: a command-line helper watches your joined video and keeps the
+stretches where a dog is on screen. It works in two steps so you always
+review before anything is cut — originals never change, nothing uploads.
+
+Setup (once; needs internet for the one-time downloads):
+
+```sh
+/opt/homebrew/bin/python3 -m venv .venv
+.venv/bin/python -m pip install ultralytics
+```
+
+Step 1 — find the dog moments (roughly ten minutes of background work per
+hour of video; the small detector model downloads itself on first run):
+
+```sh
+.venv/bin/python scripts/dog_filter.py analyze JoinedDay.mp4 --out review
+```
+
+This writes `review/segments.csv` (start, end, confidence per kept stretch),
+one preview picture per stretch in `review/thumbs/`, and a summary in
+`review/analysis.json`. Open the pictures, delete or fix any wrong rows in
+the CSV.
+
+Step 2 — build the dogs-only video (minutes, fast copy):
+
+```sh
+.venv/bin/python scripts/dog_filter.py export JoinedDay.mp4 review/segments.csv --out dogs-only.mp4
+```
+
+Useful tweaks: `--conf 0.3` keeps more (and risks more), `--every 1` checks
+twice as often, `--handles 4` widens the calm edges, `--model` points at a
+bigger detector. On macOS replace `/opt/homebrew/bin/python3` with `python3.
 
 A proprietary, damaged, or unrecognised camera stream cannot be repaired merely
 by changing its container. The source export must still contain readable media.
@@ -421,7 +520,8 @@ python scripts/test_harness.py --package "/path/to/Mediatovideo Converter.app"
 
 The test suite covers date discovery, day/child grouping, fallback layouts,
 portable naming, collision handling, folder and single-file FFmpeg
-orchestration, error clarity, both native installer contracts, deferred macOS
+orchestration, folder joining with order and codec checks, error clarity,
+both native installer contracts, deferred macOS
 Quit handling, and automatic-repair integrity and failure paths.
 
 

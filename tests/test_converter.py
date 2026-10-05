@@ -12,9 +12,15 @@ from pathlib import Path
 from mediatovideo_converter.converter import (
     ConversionProcessError,
     FFmpegNotFoundError,
+    _converter_try_demux_littlelf,
+    converter_collect_mp4s,
     converter_convert,
     converter_convert_mkv_to_mp4,
     converter_find_tools,
+    converter_join_mp4s,
+    converter_order_creation_key,
+    converter_order_folder_key,
+    converter_order_time_key,
     converter_plan_targets,
 )
 from mediatovideo_converter.models import (
@@ -200,6 +206,235 @@ class ConverterPlanningTests(unittest.TestCase):
         )
         path.write_text(f"#!{sys.executable}\n{preflight}{body}", encoding="utf-8")
         path.chmod(path.stat().st_mode | stat.S_IXUSR)
+
+
+class LittlelfDemuxTests(unittest.TestCase):
+    """Verify hidden type-3 PCM sound is split from picture."""
+
+    @staticmethod
+    def _frame(frame_type: int, payload: bytes) -> bytes:
+        import struct
+
+        header = struct.pack("<IIQII", frame_type, len(payload), 1646138013913, 0, 20)
+        return header + payload
+
+    def test_demux_splits_video_and_audio(self) -> None:
+        video = b"\x00\x00\x00\x01\x65\x01\x02"
+        audio = b"\x08\x00\xf8\xff" * 160
+        data = (
+            self._frame(1, video)
+            + self._frame(3, audio)
+            + self._frame(0, video)
+        )
+
+        split = _converter_try_demux_littlelf(data)
+
+        self.assertIsNotNone(split)
+        assert split is not None
+        self.assertEqual(split[0], video + video)
+        self.assertEqual(split[1], audio)
+
+    def test_demux_rejects_plain_h264(self) -> None:
+        self.assertIsNone(_converter_try_demux_littlelf(b"clip"))
+        self.assertIsNone(_converter_try_demux_littlelf(b"\x00\x00\x00\x01\x65"))
+
+    @unittest.skipIf(os.name == "nt", "POSIX fake executable smoke test")
+    def test_conversion_with_audio_maps_both_inputs(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            tools = root / "tools"
+            tools.mkdir()
+            ConverterPlanningTests._write_fake_tool(
+                tools / "ffprobe",
+                "import sys\nprint('1.0')\n",
+            )
+            ConverterPlanningTests._write_fake_tool(
+                tools / "ffmpeg",
+                "import pathlib, sys\n"
+                "pathlib.Path(sys.argv[-1]).write_bytes(b'converted')\n"
+                "with open(pathlib.Path(__file__).parent / 'calls.log', 'a') as log:\n"
+                "    log.write(' '.join(sys.argv) + chr(10))\n"
+                "print('out_time_us=1000000', flush=True)\n"
+                "print('progress=end', flush=True)\n",
+            )
+            clip = root / "clip.media"
+            video = b"\x00\x00\x00\x01\x65\x01\x02"
+            audio = b"\x08\x00\xf8\xff" * 160
+            clip.write_bytes(self._frame(1, video) + self._frame(3, audio))
+            group = MediaGroup(
+                day_root=root,
+                year="2026",
+                month="07",
+                day="17",
+                category=None,
+                files=(clip,),
+            )
+            options = ConversionOptions(
+                output_root=root / "output",
+                output_layout=OutputLayout.FLAT,
+                video_format=VideoFormat.MP4_H264,
+                naming_mode=NamingMode.MONTH_DAY,
+                ffmpeg_directory=tools,
+            )
+
+            tmpdir = root / "tmp"
+            tmpdir.mkdir()
+            old_tmpdir = os.environ.get("TMPDIR")
+            os.environ["TMPDIR"] = str(tmpdir)
+            try:
+                summary = converter_convert((group,), options)
+            finally:
+                if old_tmpdir is None:
+                    os.environ.pop("TMPDIR", None)
+                else:
+                    os.environ["TMPDIR"] = old_tmpdir
+
+            self.assertFalse(summary.failed_groups)
+            self.assertEqual(len(summary.completed), 1)
+            combined = (tools / "calls.log").read_text()
+            self.assertIn("s16le", combined)
+            self.assertIn("1:a:0?", combined)
+            self.assertIn(" -t ", combined)
+            self.assertNotIn("-shortest", combined)
+
+
+class JoinMp4Tests(unittest.TestCase):
+    """Verify folder-wide MP4 joining keeps time order and matching tracks."""
+
+    def test_time_order_sorts_by_date_then_event_epoch(self) -> None:
+        late = Path("Pieces") / "09-24-1632510909_0015.mp4"
+        early = Path("Pieces") / "09-24-1632510732_0013.mp4"
+        next_day = Path("Pieces") / "12-29-1640798622_0015.mp4"
+
+        ordered = sorted((late, next_day, early), key=converter_order_time_key)
+
+        self.assertEqual(ordered, [early, late, next_day])
+
+    def test_folder_order_matches_scanner_discovery(self) -> None:
+        paths = [Path("b.mp4"), Path("A.mp4")]
+
+        self.assertEqual(
+            sorted(paths, key=converter_order_folder_key),
+            [Path("A.mp4"), Path("b.mp4")],
+        )
+
+    def test_collect_finds_nested_mp4s_in_stable_order(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "2021" / "09" / "24").mkdir(parents=True)
+            (root / "flat").mkdir()
+            (root / "2021" / "09" / "24" / "b.mp4").write_bytes(b"x")
+            (root / "flat" / "a.mp4").write_bytes(b"x")
+            (root / "notes.txt").write_text("ignored")
+
+            found = converter_collect_mp4s(root)
+
+            self.assertEqual(
+                [path.name for path in found], ["b.mp4", "a.mp4"]
+            )
+
+    def test_collect_accepts_mkv_pieces_when_asked(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "09-24.mkv").write_bytes(b"x")
+            (root / "09-24.mp4").write_bytes(b"x")
+
+            default = converter_collect_mp4s(root)
+            both = converter_collect_mp4s(root, (".mp4", ".mkv"))
+
+            self.assertEqual([path.suffix for path in default], [".mp4"])
+            self.assertEqual(len(both), 2)
+
+    def test_creation_order_follows_modification_time(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            first = root / "09-24-299.mkv"
+            second = root / "09-24.mkv"
+            first.write_bytes(b"x")
+            second.write_bytes(b"x")
+            os.utime(first, (1_000_000_000, 1_000_000_000))
+            os.utime(second, (1_000_000_001, 1_000_000_001))
+
+            self.assertEqual(
+                sorted((second, first), key=converter_order_creation_key),
+                [first, second],
+            )
+
+    def test_join_refuses_single_file_and_overwrite(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            only = root / "only.mp4"
+            only.write_bytes(b"x")
+
+            with self.assertRaisesRegex(ConversionProcessError, "at least two"):
+                converter_join_mp4s((only,), root / "out.mp4")
+
+            existing = root / "out.mp4"
+            existing.write_bytes(b"kept")
+            other = root / "other.mp4"
+            other.write_bytes(b"x")
+            with self.assertRaisesRegex(ConversionProcessError, "will not be overwritten"):
+                converter_join_mp4s((only, other), existing)
+            self.assertEqual(existing.read_bytes(), b"kept")
+
+    def test_join_rejects_non_video_inputs(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            good = root / "a.mp4"
+            bad = root / "b.avi"
+            good.write_bytes(b"x")
+            bad.write_bytes(b"x")
+
+            with self.assertRaisesRegex(ConversionProcessError, "MP4 or MKV"):
+                converter_join_mp4s((good, bad), root / "out.mp4")
+
+    @unittest.skipIf(os.name == "nt", "POSIX fake executable smoke test")
+    def test_join_pipeline_uses_copy_in_listed_order(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            tools = root / "tools"
+            tools.mkdir()
+            ConverterPlanningTests._write_fake_tool(
+                tools / "ffprobe",
+                "print('codec_name=h264')\n"
+                "print('codec_type=video')\n"
+                "print('codec_name=aac')\n"
+                "print('codec_type=audio')\n"
+                "print('duration=2.0')\n",
+            )
+            ConverterPlanningTests._write_fake_tool(
+                tools / "ffmpeg",
+                "import pathlib, sys\n"
+                "pathlib.Path(sys.argv[-1]).write_bytes(b'joined')\n"
+                "with open(pathlib.Path(__file__).parent / 'calls.log', 'a') as log:\n"
+                "    log.write(' '.join(sys.argv) + chr(10))\n"
+                "print('out_time_us=2000000', flush=True)\n"
+                "print('progress=end', flush=True)\n",
+            )
+            first = root / "09-24-1632510732_0013.mkv"
+            second = root / "09-24-1632510909_0015.mp4"
+            first.write_bytes(b"one")
+            second.write_bytes(b"two")
+            target = root / "day.mp4"
+            seen: list[tuple[str, dict]] = []
+
+            result = converter_join_mp4s(
+                (second, first),
+                target,
+                ffmpeg_directory=tools,
+                event=lambda name, details: seen.append((name, details)),
+            )
+
+            self.assertFalse(result.cancelled)
+            self.assertEqual(target.read_bytes(), b"joined")
+            calls = (tools / "calls.log").read_text()
+            self.assertIn("-c copy", calls)
+            started = [details for name, details in seen if name == "single_started"]
+            self.assertEqual(len(started), 1)
+            self.assertEqual(
+                started[0]["sources"], [str(second.resolve()), str(first.resolve())]
+            )
+            self.assertIn("single_completed", [name for name, _ in seen])
 
 
 if __name__ == "__main__":

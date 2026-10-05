@@ -20,9 +20,14 @@ from . import __version__
 from . import diagnostics
 from .converter import (
     FFmpegNotFoundError,
+    converter_collect_mp4s,
     converter_convert,
     converter_convert_mkv_to_mp4,
     converter_find_tools,
+    converter_join_mp4s,
+    converter_order_creation_key,
+    converter_order_folder_key,
+    converter_order_time_key,
 )
 from .error_messages import error_messages_format, error_messages_format_operation
 from .models import (
@@ -494,6 +499,507 @@ class MkvToMp4Dialog:
         self._window.destroy()
 
 
+class JoinMp4Dialog:
+    """Modal folder-wide video joining interface with visible order control."""
+
+    def __init__(
+        self, parent: tk.Tk, ffmpeg_directory: Path | None = None
+    ) -> None:
+        self._parent = parent
+        self._ffmpeg_directory = ffmpeg_directory
+        self._files: list[Path] = []
+        self._messages: queue.Queue[tuple[Any, ...]] = queue.Queue(maxsize=500)
+        self._cancel_event = threading.Event()
+        self._busy = False
+        self._close_when_done = False
+        self._completed_output: Path | None = None
+
+        self._folder = tk.StringVar()
+        self._target = tk.StringVar()
+        self._status = tk.StringVar(
+            value="Choose a folder of MP4 or MKV pieces made by this app."
+        )
+        self._progress_detail = tk.StringVar(value="Waiting")
+
+        self._window = tk.Toplevel(parent)
+        self._window.title("Join videos — Mediatovideo Converter")
+        self._window.geometry("720x560")
+        self._window.minsize(620, 480)
+        self._window.transient(parent)
+        self._window.grab_set()
+        self._window.protocol("WM_DELETE_WINDOW", self._on_close)
+        self._build_interface()
+        self._window.after(100, self._poll_messages)
+
+    def _build_interface(self) -> None:
+        """Create folder picker, order list, and join controls."""
+
+        outer = ttk.Frame(self._window, padding=18)
+        outer.pack(fill=tk.BOTH, expand=True)
+        outer.columnconfigure(0, weight=1)
+        outer.rowconfigure(2, weight=1)
+
+        ttk.Label(
+            outer,
+            text="Join video pieces into one video",
+            font=("TkDefaultFont", 16, "bold"),
+        ).grid(row=0, column=0, sticky="w")
+        ttk.Label(
+            outer,
+            text="Picks every MP4 or MKV in a folder (subfolders included), "
+            "orders them by time, and copies them into one video.",
+            wraplength=660,
+            justify=tk.LEFT,
+        ).grid(row=1, column=0, sticky="w", pady=(2, 12))
+
+        picker = ttk.Frame(outer)
+        picker.grid(row=2, column=0, sticky="nsew")
+        picker.columnconfigure(0, weight=1)
+        picker.rowconfigure(2, weight=1)
+
+        folder_row = ttk.Frame(picker)
+        folder_row.grid(row=0, column=0, sticky="ew")
+        folder_row.columnconfigure(0, weight=1)
+        ttk.Entry(folder_row, textvariable=self._folder, state="readonly").grid(
+            row=0, column=0, sticky="ew"
+        )
+        ttk.Button(
+            folder_row, text="Choose folder…", command=self._choose_folder
+        ).grid(row=0, column=1, padx=(8, 0))
+
+        ttk.Label(picker, text="Join order (top joins first):").grid(
+            row=1, column=0, sticky="w", pady=(10, 4)
+        )
+        list_frame = ttk.Frame(picker)
+        list_frame.grid(row=2, column=0, sticky="nsew")
+        list_frame.columnconfigure(0, weight=1)
+        list_frame.rowconfigure(0, weight=1)
+        self._list = tk.Listbox(list_frame, height=8)
+        self._list.grid(row=0, column=0, sticky="nsew")
+        self._list.bind("<<ListboxSelect>>", self._on_select)
+        list_scroll = ttk.Scrollbar(
+            list_frame, orient=tk.VERTICAL, command=self._list.yview
+        )
+        list_scroll.grid(row=0, column=1, sticky="ns")
+        self._list.configure(yscrollcommand=list_scroll.set)
+
+        order_row = ttk.Frame(picker)
+        order_row.grid(row=3, column=0, sticky="ew", pady=(8, 0))
+        ttk.Button(order_row, text="Time order", command=self._sort_time).grid(
+            row=0, column=0, padx=(0, 8)
+        )
+        ttk.Button(
+            order_row, text="Original order", command=self._sort_folder
+        ).grid(row=0, column=1, padx=(0, 8))
+        ttk.Button(
+            order_row, text="Creation order", command=self._sort_creation
+        ).grid(row=0, column=2, padx=(0, 8))
+        ttk.Button(order_row, text="Up", command=self._move_up).grid(
+            row=0, column=3, padx=(0, 8)
+        )
+        ttk.Button(order_row, text="Down", command=self._move_down).grid(
+            row=0, column=4
+        )
+
+        target_row = ttk.Frame(outer)
+        target_row.grid(row=3, column=0, sticky="ew", pady=(10, 0))
+        target_row.columnconfigure(0, weight=1)
+        ttk.Label(target_row, text="Joined output:").grid(
+            row=0, column=0, sticky="w", pady=(0, 4)
+        )
+        target_entry_row = ttk.Frame(target_row)
+        target_entry_row.grid(row=1, column=0, sticky="ew")
+        target_entry_row.columnconfigure(0, weight=1)
+        self._target_entry = ttk.Entry(
+            target_entry_row, textvariable=self._target
+        )
+        self._target_entry.grid(row=0, column=0, sticky="ew")
+        self._target_button = ttk.Button(
+            target_entry_row, text="Browse…", command=self._choose_target
+        )
+        self._target_button.grid(row=0, column=1, padx=(8, 0))
+
+        progress = ttk.LabelFrame(outer, text="Join progress", padding=10)
+        progress.grid(row=4, column=0, sticky="ew", pady=(12, 0))
+        progress.columnconfigure(0, weight=1)
+        ttk.Label(progress, textvariable=self._progress_detail).grid(
+            row=0, column=0, sticky="w"
+        )
+        self._progress = ttk.Progressbar(
+            progress, mode="determinate", maximum=100, value=0
+        )
+        self._progress.grid(row=1, column=0, sticky="ew", pady=(5, 0))
+
+        ttk.Label(
+            outer,
+            textvariable=self._status,
+            wraplength=660,
+            anchor="w",
+            justify=tk.LEFT,
+        ).grid(row=5, column=0, sticky="ew", pady=(12, 0))
+
+        controls = ttk.Frame(outer)
+        controls.grid(row=6, column=0, sticky="ew", pady=(14, 0))
+        controls.columnconfigure(3, weight=1)
+        self._join_button = ttk.Button(
+            controls, text="Join videos", command=self._start_join
+        )
+        self._join_button.grid(row=0, column=0, padx=(0, 8))
+        self._cancel_button = ttk.Button(
+            controls, text="Cancel", command=self._cancel, state=tk.DISABLED
+        )
+        self._cancel_button.grid(row=0, column=1)
+        self._open_button = ttk.Button(
+            controls,
+            text="Open output folder",
+            command=self._open_output_folder,
+            state=tk.DISABLED,
+        )
+        self._open_button.grid(row=0, column=4, padx=(8, 0))
+
+    def _choose_folder(self) -> None:
+        """Collect every MP4/MKV below the chosen folder in time order."""
+
+        folder = filedialog.askdirectory(title="Choose a folder of video pieces")
+        if not folder:
+            self._status.set("Folder selection cancelled; no folder changed.")
+            return
+        try:
+            found = converter_collect_mp4s(Path(folder), (".mp4", ".mkv"))
+        except Exception as error:
+            self._show_error(str(error))
+            return
+        self._folder.set(folder)
+        if not found:
+            self._files = []
+            self._refresh_list()
+            self._status.set("No MP4 or MKV files found below the selected folder.")
+            return
+        self._files = sorted(found, key=converter_order_time_key)
+        self._refresh_list()
+        self._suggest_target(Path(folder))
+        self._status.set(
+            f"Found {len(self._files)} video(s) in time order. "
+            "Check the list, then join."
+        )
+
+    def _suggest_target(self, folder: Path) -> None:
+        """Suggest a collision-free joined filename beside the folder."""
+
+        stem = f"{folder.name}-joined"
+        candidate = folder.parent / f"{stem}.mp4"
+        number = 2
+        while candidate.exists():
+            candidate = folder.parent / f"{stem}-{number}.mp4"
+            number += 1
+        self._target.set(str(candidate))
+
+    def _refresh_list(self) -> None:
+        """Redraw the visible join order from the current file list."""
+
+        self._list.delete(0, tk.END)
+        for index, path in enumerate(self._files, start=1):
+            self._list.insert(tk.END, f"{index}. {path.name}")
+
+    def _sort_time(self) -> None:
+        """Restore automatic time order."""
+
+        self._files.sort(key=converter_order_time_key)
+        self._refresh_list()
+        self._status.set("List sorted into time order.")
+
+    def _sort_folder(self) -> None:
+        """Restore original folder-discovery order."""
+
+        self._files.sort(key=converter_order_folder_key)
+        self._refresh_list()
+        self._status.set("List restored to original folder order.")
+
+    def _sort_creation(self) -> None:
+        """Order by file creation time, oldest first.
+
+        Use this when filenames carry no event time (Month-Day naming):
+        pieces are written in event order, so creation order is time order
+        as long as the files were never moved or copied.
+        """
+
+        self._files.sort(key=converter_order_creation_key)
+        self._refresh_list()
+        self._status.set("List sorted into creation order (oldest first).")
+
+    def _move_up(self) -> None:
+        """Move the selected row one place earlier."""
+
+        selection = self._list.curselection()
+        if not selection or selection[0] == 0:
+            return
+        index = selection[0]
+        self._files[index - 1], self._files[index] = (
+            self._files[index],
+            self._files[index - 1],
+        )
+        self._refresh_list()
+        self._list.selection_set(index - 1)
+
+    def _move_down(self) -> None:
+        """Move the selected row one place later."""
+
+        selection = self._list.curselection()
+        if not selection or selection[0] >= len(self._files) - 1:
+            return
+        index = selection[0]
+        self._files[index + 1], self._files[index] = (
+            self._files[index],
+            self._files[index + 1],
+        )
+        self._refresh_list()
+        self._list.selection_set(index + 1)
+
+    def _on_select(self, _event: object) -> None:
+        """Show the full path of the selected row."""
+
+        selection = self._list.curselection()
+        if selection:
+            self._status.set(str(self._files[selection[0]]))
+
+    def _choose_target(self) -> None:
+        """Choose where the joined video should be saved."""
+
+        folder_text = self._folder.get().strip()
+        folder = Path(folder_text).expanduser() if folder_text else None
+        selected = filedialog.asksaveasfilename(
+            parent=self._window,
+            title="Save joined video as",
+            defaultextension=".mp4",
+            filetypes=(
+                ("MP4 video", "*.mp4"),
+                ("MKV video", "*.mkv"),
+                ("All files", "*.*"),
+            ),
+            initialdir=str(folder.parent) if folder else None,
+            initialfile=f"{folder.name}-joined.mp4" if folder else "joined.mp4",
+        )
+        if selected:
+            self._target.set(selected)
+            self._status.set("Joined output selected.")
+        else:
+            self._status.set("Output selection cancelled; no file changed.")
+
+    def _start_join(self) -> None:
+        """Validate the visible list and join off the Tk thread."""
+
+        if self._busy:
+            self._status.set("The join is already running.")
+            return
+        if len(self._files) < 2:
+            self._show_error(
+                error_messages_format(
+                    "Checking video inputs",
+                    "At least two video files are needed for a join.",
+                    "Choose a folder containing converted pieces, then try again.",
+                )
+            )
+            return
+        target_text = self._target.get().strip()
+        if not target_text:
+            self._show_error(
+                error_messages_format(
+                    "Checking join output",
+                    "No joined output filename has been selected.",
+                    "Choose where the joined video should be saved, then try again.",
+                )
+            )
+            return
+        ordered = list(self._files)
+        target = Path(target_text)
+        self._set_busy(True)
+        self._cancel_event.clear()
+        self._completed_output = None
+        self._progress.configure(mode="indeterminate", value=0)
+        self._progress.start(12)
+        self._progress_detail.set(f"Joining {len(ordered)} video(s)…")
+        self._status.set(
+            "Join started. First file joins first — check the list order."
+        )
+
+        def worker() -> None:
+            try:
+                result = converter_join_mp4s(
+                    ordered,
+                    target,
+                    ffmpeg_directory=self._ffmpeg_directory,
+                    event=lambda name, details: self._queue_event(name, details),
+                    cancel_event=self._cancel_event,
+                )
+            except Exception as error:
+                self._messages.put(("error", error))
+            else:
+                self._messages.put(("done", result))
+
+        threading.Thread(target=worker, name="mp4-join", daemon=True).start()
+
+    def _queue_event(self, name: str, details: dict[str, object]) -> None:
+        """Queue progress events while allowing redundant updates to be dropped."""
+
+        try:
+            self._messages.put_nowait(("event", name, details))
+        except queue.Full:
+            pass
+
+    def _poll_messages(self) -> None:
+        """Render worker messages safely on Tk's thread."""
+
+        try:
+            while True:
+                message = self._messages.get_nowait()
+                if message[0] == "event":
+                    self._handle_event(message[1], message[2])
+                elif message[0] == "error":
+                    self._finish_error(message[1])
+                elif message[0] == "done":
+                    self._finish_join(message[1])
+        except queue.Empty:
+            pass
+        try:
+            if self._window.winfo_exists():
+                self._window.after(100, self._poll_messages)
+        except tk.TclError:
+            return
+
+    def _handle_event(self, name: str, details: dict[str, object]) -> None:
+        """Display join progress events."""
+
+        if name == "single_started":
+            sources = details.get("sources", [])
+            count = len(sources) if isinstance(sources, list) else "?"
+            self._progress_detail.set(f"Joining {count} video(s)…")
+        elif name == "encoding_progress":
+            fraction = details.get("fraction")
+            if fraction is None:
+                self._progress_detail.set("Joining videos…")
+                return
+            self._progress.stop()
+            self._progress.configure(
+                mode="determinate", maximum=100, value=float(fraction) * 100
+            )
+            self._progress_detail.set(
+                f"Joining videos… {float(fraction) * 100:.1f}%"
+            )
+
+    def _finish_join(self, result: Any) -> None:
+        """Show cancellation or successful completion."""
+
+        self._progress.stop()
+        self._set_busy(False)
+        if result.cancelled:
+            self._progress.configure(mode="determinate", value=0)
+            self._progress_detail.set("Join cancelled")
+            self._status.set("Video join was cancelled safely.")
+        else:
+            self._completed_output = result.output
+            self._progress.configure(mode="determinate", maximum=100, value=100)
+            self._progress_detail.set("Join complete")
+            self._status.set(f"Joined video created: {result.output}")
+            self._open_button.configure(state=tk.NORMAL)
+            messagebox.showinfo(
+                "Join complete",
+                f"The joined video was created successfully.\n\nOutput: {result.output}",
+                parent=self._window,
+            )
+        if self._close_when_done:
+            self._destroy()
+
+    def _finish_error(self, error: BaseException) -> None:
+        """Restore controls and show a structured join error."""
+
+        self._progress.stop()
+        self._progress.configure(mode="determinate", value=0)
+        self._progress_detail.set("Join failed")
+        self._set_busy(False)
+        text = str(error)
+        details = (
+            text
+            if text.startswith("Stage:")
+            else error_messages_format_operation("Joining videos", error)
+        )
+        self._status.set("The videos could not be joined. See the error dialog.")
+        self._show_error(details)
+        if self._close_when_done:
+            self._destroy()
+
+    def _show_error(self, details: str) -> None:
+        """Show an error in both the window and a readable dialog."""
+
+        self._status.set(details.replace("\n", " "))
+        messagebox.showerror("Join videos error", details, parent=self._window)
+
+    def _set_busy(self, busy: bool) -> None:
+        """Enable only actions that are safe for the current state."""
+
+        self._busy = busy
+        normal_state = tk.DISABLED if busy else tk.NORMAL
+        self._target_entry.configure(state=normal_state)
+        self._target_button.configure(state=normal_state)
+        self._join_button.configure(state=normal_state)
+        self._cancel_button.configure(state=tk.NORMAL if busy else tk.DISABLED)
+
+    def _cancel(self) -> None:
+        """Request a safe FFmpeg cancellation and acknowledge immediately."""
+
+        if not self._busy:
+            self._status.set("There is no join running to cancel.")
+            return
+        self._cancel_event.set()
+        self._cancel_button.configure(state=tk.DISABLED)
+        self._status.set("Cancellation requested; waiting for FFmpeg to stop safely…")
+
+    def _open_output_folder(self) -> None:
+        """Open the folder containing the joined video."""
+
+        if not self._completed_output:
+            self._status.set("No joined video is available to open yet.")
+            return
+        folder = self._completed_output.parent
+        try:
+            if os.name == "nt":
+                os.startfile(folder)  # type: ignore[attr-defined]
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", str(folder)])
+            else:
+                subprocess.Popen(["xdg-open", str(folder)])
+        except OSError as error:
+            self._show_error(
+                error_messages_format_operation("Opening joined output folder", error)
+            )
+        else:
+            self._status.set(f"Opened output folder: {folder}")
+
+    def _on_close(self) -> None:
+        """Protect a running join when the dialog is closed."""
+
+        if self._busy:
+            if not messagebox.askyesno(
+                "Join running",
+                "Cancel the video join and close this window?",
+                parent=self._window,
+            ):
+                self._status.set("Video join is continuing.")
+                return
+            self._close_when_done = True
+            self._cancel()
+            return
+        self._destroy()
+
+    def _destroy(self) -> None:
+        """Release the modal grab and close the dialog."""
+
+        try:
+            self._window.grab_release()
+        except tk.TclError:
+            pass
+        self._window.destroy()
+
+
 class MediaToVideoApp:
     """Own and coordinate the desktop interface."""
 
@@ -673,12 +1179,16 @@ class MediaToVideoApp:
             controls, text="MKV → MP4 tool", command=self._open_mkv_tool
         )
         self._mkv_button.grid(row=0, column=4, padx=(8, 0))
+        self._join_button = ttk.Button(
+            controls, text="Join videos", command=self._open_join_tool
+        )
+        self._join_button.grid(row=0, column=5, padx=(8, 0))
         ttk.Button(
             controls, text="Open output folder", command=self._open_output
-        ).grid(row=0, column=5, padx=(8, 0))
+        ).grid(row=0, column=6, padx=(8, 0))
         ttk.Button(
             controls, text="Open diagnostic log", command=self._open_diagnostic_log
-        ).grid(row=0, column=6, padx=(8, 0))
+        ).grid(row=0, column=7, padx=(8, 0))
 
         status = ttk.Label(
             outer,
@@ -785,6 +1295,23 @@ class MediaToVideoApp:
             Path(ffmpeg_text).expanduser() if ffmpeg_text else None,
         )
         self._status.set("MKV to MP4 tool opened.")
+
+    def _open_join_tool(self) -> None:
+        """Open the modal folder-wide video joiner."""
+
+        if self._busy_operation:
+            self._show_input_error(
+                f"The application is currently {self._busy_operation}.",
+                "Wait for the current operation to finish or cancel it before "
+                "opening the Join videos tool.",
+            )
+            return
+        ffmpeg_text = self._ffmpeg_directory.get().strip()
+        JoinMp4Dialog(
+            self._root,
+            Path(ffmpeg_text).expanduser() if ffmpeg_text else None,
+        )
+        self._status.set("Join videos tool opened.")
 
     def _source_or_grouping_changed(self, *_args: object) -> None:
         """Invalidate stale scan data when its inputs change."""
@@ -1066,6 +1593,7 @@ class MediaToVideoApp:
         self._scan_button.configure(state=tk.DISABLED)
         self._convert_button.configure(state=tk.DISABLED)
         self._mkv_button.configure(state=tk.DISABLED)
+        self._join_button.configure(state=tk.DISABLED)
         self._cancel_button.configure(state=tk.NORMAL)
         self._status.set(f"{operation.capitalize()} in progress…")
 
@@ -1075,6 +1603,7 @@ class MediaToVideoApp:
         self._busy_operation = None
         self._scan_button.configure(state=tk.NORMAL)
         self._mkv_button.configure(state=tk.NORMAL)
+        self._join_button.configure(state=tk.NORMAL)
         self._cancel_button.configure(state=tk.DISABLED)
         if self._scan_result and self._scan_result.groups:
             self._convert_button.configure(state=tk.NORMAL)

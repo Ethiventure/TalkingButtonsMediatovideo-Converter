@@ -12,7 +12,7 @@ from typing import Callable
 from .models import GroupingMode, MediaGroup, ScanResult
 
 ScanProgress = Callable[[int, Path], None]
-_YEAR_RE = re.compile(r"^\d{4}$")
+_YEAR_RE = re.compile(r"^(\d{4})\b")
 _MONTH_DAY_RE = re.compile(r"^\d{1,2}$")
 
 
@@ -102,17 +102,18 @@ def _scanner_find_date_root(
 
     current = start
     while current == source_root or source_root in current.parents:
+        year_match = _YEAR_RE.match(current.parent.parent.name)
         if (
             _MONTH_DAY_RE.fullmatch(current.name)
             and _MONTH_DAY_RE.fullmatch(current.parent.name)
-            and _YEAR_RE.fullmatch(current.parent.parent.name)
+            and year_match
         ):
             month_value = int(current.parent.name)
             day_value = int(current.name)
             if 1 <= month_value <= 12 and 1 <= day_value <= 31:
                 return (
                     current,
-                    current.parent.parent.name,
+                    year_match.group(1),
                     f"{month_value:02d}",
                     f"{day_value:02d}",
                 )

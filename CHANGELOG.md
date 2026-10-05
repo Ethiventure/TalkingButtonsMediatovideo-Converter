@@ -65,6 +65,104 @@ All notable changes to Mediatovideo Converter are recorded here.
 - Version checks and self-contained packages cannot guarantee compatibility
   with future operating-system changes. macOS 27.0 has a documented upstream
   Tk dialog issue and requires workflow-specific validation.
+=======
+## [Unreleased]
+
+Plain English: a new `scripts/dog_filter.py` keeps only the parts of a video
+where a dog is on screen. It checks frames on your own Mac, writes a review
+list with preview pictures, then builds the dogs-only video after you
+approve. Nothing uploads; originals never change.
+
+Technical: two-step CLI (`analyze`/`export`) on the repo `.venv`
+(ultralytics YOLOv8s by default at 960px, COCO `dog`); uniform sampling
+(default 2 s, exact threshold/merge/handles flags); review artifacts
+`segments.csv` + `thumbs/` + `analysis.json`; export via per-segment `-c copy`
+and `concat`-copy `+faststart` with atomic rename. Verified on a 6-minute
+demo: 248 s kept over 4 segments (spot-checked thumbs show the dog;
+a dropped stretch verified dog-free by eye), joined MP4 AV in sync, decoded
+audio non-silent (RMS 235).
+
+## [0.3.3] - 2026-10-05
+
+Plain English: pieces keep real, playable sound now, and the joiner takes
+MKV pieces too.
+
+- Fixed empty sound tracks. Pieces showed a sound track but played silence,
+  because the join step starved the sound while copying the picture. Each
+  piece is now cut to an exact measured length instead. If your pieces were
+  made with 0.3.1–0.3.2, make them once more — the old ones hold no sound
+  and cannot be rescued by joining.
+- The joiner accepts MKV pieces as well as MP4 (same picture/sound inside),
+  and the output can be MP4 or MKV. A **Creation order** button sorts by file
+  time, which recovers event order when filenames are plain numbers like
+  `09-24-266`. Tip: choose File naming Month-Day-Category so piece names
+  carry the event time themselves.
+
+Technical:
+
+- Per-clip segments dropped `-shortest` for an output `-t
+  min(video_frames/fps, audio_bytes/16000)` cut
+  (`_converter_segment_cut`; demux now returns the frame count). Rationale:
+  copied H.264 packets from raw Annex-B carry no usable timestamps
+  (`matroska: Timestamps are unset`), so `-shortest` ended the audio stream
+  at ~0 frames while the track header kept a plausible duration; AAC-side
+  `Too many bits 16384 > 6144, clamping` noise was a red herring (encoder
+  output decodes fine in isolation).
+- `converter_join_mp4s`/`converter_collect_mp4s` accept `.mp4`+`.mkv`
+  (uniform `h264` + all-`aac`/all-silent gates unchanged, container-agnostic);
+  new `converter_order_creation_key` (mtime); dialog gains Creation-order
+  sort, MKV save type, and container-neutral wording.
+- Verified by decoding, not just probing: rebuilt piece audio 188416 bytes
+  RMS 13.9; 5-piece creation-order join MP4 video 364.72 s / audio 365.03 s
+  with decoded RMS 280 / peak 18620.
+
+## [0.3.2] - 2026-10-05
+
+Plain English: year folders with extra words now work, and small videos can
+be joined back together.
+
+- Folders named like `2021 video` now count as year 2021, so one big pile of
+  clips splits into its real days again. Before, 1281 clips landed in a
+  single day because only pure `2021` was accepted.
+- New “Join MP4s” button. Convert by child folder first (many short, fast
+  videos in one folder), then pick that folder and join them into one video.
+  The list shows the join order: time order by default, original folder order
+  on one click, plus Up/Down to fix anything by hand. Joining copies without
+  re-drawing, so it takes minutes and keeps full quality.
+
+Technical:
+
+- `scanner._YEAR_RE` changed from `^\d{4}$` fullmatch to `^(\d{4})\b` prefix
+  match; `_scanner_find_date_root` uses the captured group as the year.
+  Backward compatible with pure `YYYY` layouts.
+- New `converter_join_mp4s` (+ `converter_collect_mp4s`,
+  `converter_order_time_key`, `converter_order_folder_key`): recursive
+  folder collect in casefold path order; time key
+  `(year, month, day, epoch, filename)` parsed from mirror dirs, `MM-DD`
+  stems, and embedded 10-digit event epochs; validation (≥2 inputs, `.mp4`
+  only, target must not exist, uniform `h264` video + all-`aac`/all-silent
+  audio via order-independent `_converter_probe_streams`); single
+  `ffmpeg -f concat -c copy -movflags +faststart` through the existing
+  atomic-partial/cancel/progress path, reusing `MkvConversionResult`.
+- New modal `JoinMp4Dialog` (list with Time/Original/Up/Down, collision-free
+  `<folder>-joined.mp4` suggestion, busy guards) + main-window button with
+  busy/idle state handling.
+- Tests: 2 scanner year-suffix cases, 5 join cases (order keys, recursive
+  collect, validation, copy pipeline preserving caller order).
+
+## [0.3.1] - 2026-10-05
+
+### Fixed
+
+- LittlelfSmart `.media` sound is now kept. These files pack picture (types
+  0/1) and 8000 Hz 16-bit mono sound (type 3) behind 24-byte headers, which
+  FFmpeg alone reads as picture-only. The trailing flag word varies per camera
+  (20, 24, 81, ...) and is no longer used to reject files.
+- Each clip is now encoded on its own measured frame rate (typically 15-20
+  fps from file timestamps) with its own sound, then segments are joined with
+  copy. Bulk-joining raw streams caused mostly-silent output and drift across
+  hundreds of clips. Files without type-3 chunks still make silent video.
+- Added splitter regression tests for LittlelfSmart packing and audio mapping.
 
 ## [0.3.0] - 2026-07-18
 

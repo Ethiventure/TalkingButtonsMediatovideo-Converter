@@ -53,7 +53,6 @@ project history.
 - Kept the fictional conversion-progress illustration as a clearly labelled
   example rather than presenting it as a real screenshot.
 
-
 ## 2026-10-05 — Version 0.4.0 runtime guards and native packaging
 
 - Replaced import-only compatibility acceptance with package version floors
@@ -147,3 +146,163 @@ project history.
 - Native probes proved CREATE_NO_WINDOW executes the helper, unlike DETACHED_PROCESS, and ruled out empty PATH as the private-profile stall cause.
 - Replaced helper cmdlets with direct .NET file, directory, process, time, sleep, and relaunch operations. Preserved atomic results, empty-only cleanup, lock ownership, backup retention, and rollback.
 - Kept exact minimal-environment success, rollback, and deadline tests; added silent-exit rejection and removed temporary probe matrices after preserving diagnostic evidence.
+=======
+## 2026-10-05 — Day log: sound recovery, dates, joining, dog filter
+
+Work by Muse Spark (Meta's model) in opencode for Ethiventure. The owner
+keeps talking-button dog videos from a LittlelfSmart motion camera. Read top
+to bottom: each step caused the next. Versions moved 0.3.0 → 0.3.1 → 0.3.2 →
+0.3.3 → Unreleased (dog filter); tests moved 15 → 18 → 25 → 28, green
+throughout. Each step below has plain words first, then technical detail,
+then the proof that it worked.
+
+### 1. The app window opened blank
+
+Plain: the Mac's old drawing kit could not draw the app, so the window came
+up empty. Installing the new kit through Homebrew fixed it.
+
+Technical: system Python 3.9.6 ships Tk 8.5 (deprecated); ran
+`brew install python-tk` (3.14.8_1), so the launcher picks
+`/opt/homebrew/bin/python3` with Tk 9.1. Note: Tk windows hang in headless
+agent sessions (no display) — expected, not a bug.
+
+Proof: prerequisites all OK, app code imports, 15/15 tests green.
+
+### 2. Converted videos had no sound
+
+Plain: the app made silent videos, but the camera's own app played sound. So
+the sound was hiding inside the files in a shape normal tools cannot see.
+
+Technical: `ffprobe` showed video-only (`h264`) on sources and outputs. A hex
+look found a 24-byte header per chunk —
+`[u32 type][u32 len][u64 timestamp_ms][u32 ?][u32 ?]` — with types 0/1
+carrying H.264 video and type 3 carrying 640-byte 8000 Hz 16-bit mono PCM
+(~40 ms per chunk). FFmpeg's H264 reader skips type-3 chunks as invalid data.
+
+Proof: 20 sampled clips, all video-only to `ffprobe`, all carrying type-3
+sound underneath.
+
+### 3. First sound fix, then its two bugs (v0.3.1)
+
+Plain: the first splitter worked on two test clips but failed almost
+everything in a full run, and joining thousands of clips in one go let sound
+slide away from picture. Both got fixed.
+
+Technical: (a) the splitter only accepted one flag value (`tail == 20`;
+cameras send 20/24/81, ...) — gate relaxed to header size, sane lengths, and
+types 0/1/3. (b) Bulk raw concatenation replaced with per-clip encode on
+measured frame rate (typically 15–20 fps, clamped 10–30) plus copy-join.
+
+Proof: 18/18 tests; the full run's 9 minutes of sound out of 2.8 hours
+matched the old gate's ~1-in-15 pass rate exactly.
+
+### 4. Real dates and a joiner (v0.3.2)
+
+Plain: folders named `2021 video` did not count as a year, so 1281 clips fell
+into one pile. They count now. A Join button was added so many short, fast
+piece videos can be merged into day videos in a shown, fixable order.
+
+Technical: scanner year check `^\d{4}$` → `^(\d{4})\b`; new
+`converter_join_mp4s` + `converter_collect_mp4s` + time/folder order keys +
+order-independent stream probing (real `ffprobe` prints name-before-type);
+new modal `JoinMp4Dialog` (Time / Original / Up / Down list).
+
+Proof: 2021 source went 1 pile → 4 days / 374 event groups (2022: 7 days /
+787 groups); 25/25 tests; 3-piece demo joined at 91.87 s video / 91.97 s
+audio.
+
+### 5. The MKV pieces looked wrong but were fine
+
+Plain: the owner's 374 pieces came out as MKV with odd names like
+`09-24-266`. That was two settings, not broken code: the format box was left
+on MKV (fast and fine), and Month-Day naming numbers collisions instead of
+naming events. Creation order still equals event order.
+
+Technical: verified oldest file `09-24.mkv` through newest `09-24-299.mkv`
+follow conversion (hence event) order. Advice recorded: Month-Day-Category
+naming for meaningful names; do not move/copy pieces before joining.
+
+### 6. Ghost soundtracks (v0.3.3)
+
+Plain: pieces listed a sound track but played silence. Each piece is now cut
+to an exact measured length, so sound survives. The joiner also takes MKV
+and can sort by creation time. Pieces made before this fix hold no sound and
+must be re-made.
+
+Technical: `-c:v copy` from raw Annex-B leaves packets without usable
+timestamps (`matroska: Timestamps are unset`), under which `-shortest` ended
+the AAC stream at ~0 frames while the track header kept a plausible duration.
+Fix: output `-t min(frames/fps, audio_bytes/16000)` via
+`_converter_segment_cut` (demux now returns the frame count). The AAC-side
+`Too many bits, clamping` warning was a red herring (isolated encodes decode
+1:1). Join went container-agnostic (`.mp4`+`.mkv`). Standing lesson: verify
+sound by decoding, never by listing tracks.
+
+Proof: rebuilt piece audio decodes (188416 bytes, RMS matches source PCM);
+5-piece join decoded RMS 280 / peak 18620; 28/28 tests.
+
+### 7. Outside tools checked before building (dog filter decision)
+
+Plain: three suggested apps were checked live. None fits the job — one is a
+general editor needing a paid AI key, one finds moments but cannot edit, one
+is young and Windows-first. So a small local script got built instead. Scene
+detection was left out on purpose: a still sensor camera gains nothing from
+it; even sampling wins.
+
+Technical: OpenReel exists twice under one name (browser `Augani/openreel-video`,
+MIT ~5k stars; desktop `openreelio/openreelio`, 19 stars, v0.1.0) plus a token
+promo on its site. VideoHighlighter (`Aseiel/VideoHighlighter`, AGPL-3.0,
+~132 stars) is closest but immature. Edit Mind (`IliasHad/edit-mind`, ~1.8k
+stars) is search-only, Docker-based, self-described not production-ready,
+custom licence. One licence lookup failed transiently; YOLO licence flagged
+as check-at-install (believed AGPL, fine for home use).
+
+### 8. Dog filter script (Unreleased)
+
+Plain: a command-line helper keeps only the parts of a video where a dog is
+on screen. It works in two steps — find moments and write a review list with
+preview pictures, then build the video after approval. Originals never change
+and nothing uploads. The tiny detector kept missing the small dark dog, so a
+stronger one at higher detail became the default. Review pictures were checked
+by eye; one dropped stretch was confirmed genuinely dog-free.
+
+Technical: `scripts/dog_filter.py` (`analyze` → `segments.csv` + `thumbs/` +
+`analysis.json`, then `export` via per-segment `-c copy` and concat-copy
+`+faststart` with atomic rename and overwrite refusal). Repo `.venv`
+(gitignored) holds ultralytics 8.4.173; weights in `~/.cache/dog_filter/`.
+Tuning on 182 demo frames: nano/640 → 29 hits; small/640 → 59–62; small/960 →
+75–79. Defaults: yolov8s, imgsz 960, conf 0.25, merge-gap 10, handles 3, plus
+`--imgsz`/`--model`/`--every` flags. Demo result: 248/365 s kept over 4
+segments; export decoded non-silent (RMS 235). Cost guide: ~10 min background
+work per hour of footage.
+
+### 9. README and docs
+
+Plain: the top of the README now describes the talking-button `.media` job
+(the original gist sentence kept word for word). A full instructions audit
+checked every step against the real files and fixed five stale points,
+including a brand-new dog-filter setup section. A per-project notebook
+(`docs/things-taught.md`) keeps each structural lesson in plain words.
+
+Technical: audit fixes were the workflow count (two → four), the Join button
+rename, MKV picture-stream wording, the missing dog-filter setup, and the
+test-coverage line. Verified live: gist link, WinGet IDs against
+`install_windows.ps1`, all screenshots present, tests green on system Python
+3.9 and brew 3.14. Screenshots predate the Join button (agent sessions have no
+screen to retake them) — the README says so.
+
+### 10. Security sweep and scrub
+
+Plain: the whole repo was checked file by file. No personal videos, no
+secrets, no personal paths anywhere; history never held any. The two dog
+names and one real folder name were removed wherever they had slipped in.
+One leftover dead function was deleted.
+
+Technical: 32 tracked files; repo-wide searches for names, usernames, and
+local/temp paths return zero; `git log -S` clean; `.venv` (1.1 GB) ignored.
+Removed `_converter_demux_group` (unused since the per-clip rewrite) and the
+`"Nietzsche videos"` test fixture (now `"Camera exports"`). Kept upstream
+`JaredReabow` provenance (public, not personal). Playback demos for the owner
+live outside the repo: `littlelf-test-with-sound.mp4`,
+`joined-3-events-demo.mp4`, `littlelf-mixed-8clips-test.mp4`,
+`joined-5-events-fixed.mp4`, `dogs-only-demo.mp4`.
