@@ -869,10 +869,10 @@ class SwapHelperTests(RecoveryTestCase):
 
         self.assertIn("[System.IO.File]::WriteAllText($temporary, $payload", text)
         self.assertIn("[System.Text.UTF8Encoding]::new($false)", text)
-        self.assertIn("Move-Item -LiteralPath $temporary -Destination $ResultPath -Force", text)
+        self.assertIn("[System.IO.File]::Replace($temporary, $ResultPath, $null)", text)
         self.assertIn("Release-Lock", text)
         self.assertNotIn("@{{", text)
-        self.assertIn("Move-Item -LiteralPath $Backup -Destination $Target", text)
+        self.assertIn("[System.IO.Directory]::Move($Backup, $Target)", text)
 
     @unittest.skipIf(sys.platform == "win32", "POSIX helper")
     def test_lock_is_released_only_by_its_owner(self) -> None:
@@ -1092,68 +1092,8 @@ class SwapHelperTests(RecoveryTestCase):
         self.assertTrue(recovery._recovery_pid_alive(os.getpid()))
         self.assertFalse(recovery._recovery_pid_alive(2147483646))
 
-    @unittest.skipUnless(sys.platform == "win32", "native Windows launch diagnosis")
-    def test_windows_launch_diagnostic_matrix(self) -> None:
-        """Record bounded controls for argv, environment and process flags."""
-        full = dict(os.environ)
-        minimal = {"PATH": "", "HOME": str(self.root), "USERPROFILE": str(self.root),
-                   "LOCALAPPDATA": str(self.cache), "TEMP": str(self.root),
-                   "TMP": str(self.root), "SystemRoot": os.environ["SystemRoot"]}
-        names = ("ParentPid", "Candidate", "Target", "Backup", "LogPath",
-                 "ResultPath", "LockPath", "WaitSeconds", "Relaunch", "RelaunchCommand")
-        cases = [("minimal_os_path", "no_window", "raw", None),
-                 ("full_empty_path", "no_window", "raw", None)]
-        system = Path(os.environ["SystemRoot"])
-        os_path = os.pathsep.join(str(p) for p in
-                  (system / "System32", system, system / "System32" / "WindowsPowerShell" / "v1.0"))
-        anchors = {}
-        outcomes = []
-        for index, (env_name, flags_name, shape, restored) in enumerate(cases):
-            folder = self.root / f"matrix {index}'s fixture"
-            folder.mkdir()
-            target, candidate, backup = (folder / name for name in ("target", "candidate", "backup"))
-            target.mkdir(); candidate.mkdir()
-            result, lock = folder / "result.json", folder / "lock"
-            helper = recovery._recovery_write_helper(folder, relaunch=False)
-            arguments = ["2147483646", str(candidate), str(target), str(backup), "",
-                         str(result), str(lock), "3", "0", str(target / "app.exe")]
-            if shape == "marker":
-                helper.write_text('param([string]$Marker)\n[System.IO.File]::WriteAllText($Marker, "ok")\n', encoding="utf-8")
-                arguments = [str(result)]
-            elif shape == "named":
-                arguments = [value for pair in zip(("-" + name for name in names), arguments) for value in pair]
-            environment = dict(full if env_name.startswith("full") else minimal)
-            environment["PATH"] = "" if env_name == "full_empty_path" else os_path
-            if restored:
-                environment.update(anchors if restored == "all" else {restored: anchors[restored]})
-            environment.update(RECOVERY_RESULT_TARGET_JSON=json.dumps(str(target)),
-                               RECOVERY_RESULT_BACKUP_JSON=json.dumps(str(backup)))
-            command = [str(recovery._recovery_windows_powershell()), "-NoProfile", "-ExecutionPolicy", "Bypass"]
-            command += ["-File", str(helper), *arguments]
-            log = folder / "startup.log"
-            startupinfo = None
-            if flags_name == "hidden_console":
-                startupinfo = subprocess.STARTUPINFO()
-                startupinfo.dwFlags = subprocess.STARTF_USESHOWWINDOW
-                startupinfo.wShowWindow = 0
-            flags = {"regular": 0, "no_window": 0x08000200, "hidden_console": 0x10}[flags_name]
-            with log.open("wb") as output:
-                child = subprocess.Popen(command, env=environment, stdin=subprocess.DEVNULL,
-                                         stdout=output, stderr=output,
-                                         creationflags=flags, startupinfo=startupinfo)
-                try:
-                    status = child.wait(timeout=8)
-                except subprocess.TimeoutExpired:
-                    status = "timeout"
-                    child.kill(); child.wait(timeout=5)
-            outcomes.append(dict(env=env_name, flags=flags_name, shape=shape,
-                                 restored=restored, status=status,
-                                 result=result.is_file(), output=log.read_text(errors="replace")))
-        print("WINDOWS_LAUNCH_MATRIX " + json.dumps(outcomes), flush=True)
-
-    @unittest.skipUnless(sys.platform == "win32", "native detached Windows launcher")
-    def test_windows_production_launcher_with_minimal_environment(self) -> None:
-        """Exercise the actual raw argv and detached launch with hostile paths."""
+    def run_windows_production_launcher(self, scenario: str) -> None:
+        """Check actual background launch, replacement, rollback or deadline."""
         folder = self.root / "repair's test folder"
         folder.mkdir()
         target = folder / "target"
@@ -1175,8 +1115,10 @@ class SwapHelperTests(RecoveryTestCase):
             "TMP": str(self.root), "TMPDIR": str(self.root),
             "SystemRoot": os.environ["SystemRoot"],
         }
-        arguments = ["2147483646", str(candidate), str(target), str(backup), "",
-                     str(result), str(lock), "3", "0", str(target / "app.exe")]
+        parent = str(os.getpid()) if scenario == "deadline" else "2147483646"
+        staged = candidate if scenario != "rollback" else folder / "missing-candidate"
+        arguments = [parent, str(staged), str(target), str(backup), "",
+                     str(result), str(lock), "1", "0", str(target / "app.exe")]
         startup = result.with_suffix(".helper-startup.log")
         children = []
         real_popen = subprocess.Popen
@@ -1204,17 +1146,48 @@ class SwapHelperTests(RecoveryTestCase):
             ):
                 recovery._recovery_launch_helper(helper, arguments)
         except OSError as error:
-            self.fail(f"{error}\n{startup.read_text(errors='replace')}")
+            if scenario == "success" or not result.is_file():
+                self.fail(f"{error}\n{startup.read_text(errors='replace')}")
         deadline = time.monotonic() + 20
         while not result.is_file() and time.monotonic() < deadline:
             time.sleep(0.1)
         self.assertTrue(result.is_file(), startup.read_text(errors="replace"))
         payload = json.loads(result.read_text(encoding="utf-8"))
-        self.assertTrue(payload["ok"], payload)
+        self.assertEqual(payload["ok"], scenario == "success", payload)
         self.assertEqual(payload["target_path"], str(target))
-        self.assertTrue((target / "new.txt").is_file())
-        self.assertTrue((backup / "old.txt").is_file())
+        if scenario == "success":
+            self.assertTrue((target / "new.txt").is_file())
+            self.assertTrue((backup / "old.txt").is_file())
+        else:
+            self.assertTrue((target / "old.txt").is_file())
+            self.assertTrue((candidate / "new.txt").is_file())
+            self.assertFalse(backup.exists())
+            self.assertIn("original was restored" if scenario == "rollback" else "did not exit", payload["detail"])
         self.assertTrue(lock.is_file())
+
+    @unittest.skipUnless(sys.platform == "win32", "native Windows launcher")
+    def test_windows_production_launcher_with_minimal_environment(self) -> None:
+        self.run_windows_production_launcher("success")
+
+    @unittest.skipUnless(sys.platform == "win32", "native Windows launcher rollback")
+    def test_windows_production_launcher_rolls_back_without_modules(self) -> None:
+        self.run_windows_production_launcher("rollback")
+
+    @unittest.skipUnless(sys.platform == "win32", "native Windows launcher deadline")
+    def test_windows_production_launcher_deadline_preserves_the_app(self) -> None:
+        self.run_windows_production_launcher("deadline")
+
+    def test_windows_launcher_rejects_a_silent_exit_without_a_result(self) -> None:
+        """A successful OS exit cannot stand in for a repair result."""
+        result = self.cache / "silent-result.json"
+        child = mock.Mock(pid=4321)
+        child.wait.return_value = 0
+        arguments = ["1", "candidate", "target", "backup", "", str(result), "lock", "1", "0", "app.exe"]
+        with mock.patch.object(recovery.sys, "platform", "win32"), mock.patch.object(
+            recovery.subprocess, "Popen", return_value=child
+        ), self.assertRaisesRegex(OSError, "status 0.*startup log"):
+            recovery._recovery_launch_helper(self.cache / "helper.ps1", arguments)
+        self.assertTrue(result.with_suffix(".helper-startup.log").is_file())
 
     @unittest.skipUnless(sys.platform == "win32", "native Windows helper test")
     def test_windows_helper_swaps_a_fake_directory(self) -> None:

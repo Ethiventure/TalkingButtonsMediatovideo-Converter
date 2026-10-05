@@ -141,3 +141,9 @@ project history.
 ### Version 0.4.2 Windows private system PATH probe
 
 - Hidden-process probes execute the marker correctly. Added a focused OS-only PATH versus empty-PATH probe to isolate the remaining helper environment difference before changing its policy.
+
+### Version 0.4.2 Windows background repair correction
+
+- Native probes proved CREATE_NO_WINDOW executes the helper, unlike DETACHED_PROCESS, and ruled out empty PATH as the private-profile stall cause.
+- Replaced helper cmdlets with direct .NET file, directory, process, time, sleep, and relaunch operations. Preserved atomic results, empty-only cleanup, lock ownership, backup retention, and rollback.
+- Kept exact minimal-environment success, rollback, and deadline tests; added silent-exit rejection and removed temporary probe matrices after preserving diagnostic evidence.

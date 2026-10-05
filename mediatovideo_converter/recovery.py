@@ -724,20 +724,21 @@ def _recovery_launch_helper(helper: Path, arguments: Sequence[str]) -> int:
             [
                 str(powershell),
                 "-NoProfile",
+                "-NonInteractive",
                 "-ExecutionPolicy",
                 "Bypass",
                 "-File",
                 str(helper),
                 *arguments,
             ],
-            creationflags=0x00000008 | 0x00000200,  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+            creationflags=0x08000000 | 0x00000200,  # CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP
             **options,
         )
     try:
         status = process.wait(timeout=0.25)
     except subprocess.TimeoutExpired:
         status = None
-    if status not in (None, 0):
+    if status is not None and (status != 0 or not Path(arguments[5]).is_file()):
         raise OSError(f"Repair helper exited with status {status}; startup log: {startup_log}")
     return process.pid
 
@@ -1158,39 +1159,56 @@ _POWERSHELL_HELPER = """param(
     [string]$RelaunchCommand = ""
 )
 $ErrorActionPreference = "Stop"
+# Only PowerShell language and .NET APIs are used below. Cmdlet autoload can
+# stall under a private application profile even when powershell.exe starts.
+
 
 function Write-Log([string]$Message) {
-    if ($LogPath -ne "") { Add-Content -LiteralPath $LogPath -Value $Message -ErrorAction SilentlyContinue }
+    if ($LogPath -ne "") {
+        try { [System.IO.File]::AppendAllText($LogPath, $Message + [Environment]::NewLine, [System.Text.UTF8Encoding]::new($false)) } catch { }
+    }
 }
 function Release-Lock {
     if ($LockPath -eq "") { return }
-    try { $first = Get-Content -LiteralPath $LockPath -TotalCount 1 } catch { return }
-    if ("$first" -eq "pid=$PID") { Remove-Item -LiteralPath $LockPath -Force -ErrorAction SilentlyContinue }
+    try { $first = [System.IO.File]::ReadAllLines($LockPath)[0] } catch { return }
+    if ("$first" -eq "pid=$PID") { try { [System.IO.File]::Delete($LockPath) } catch { } }
 }
 function Write-Result([bool]$Ok, [string]$Detail) {
     $payload = '{"ok":' + $Ok.ToString().ToLower() + ',"detail":"' + $Detail + '","target_path":' + $env:RECOVERY_RESULT_TARGET_JSON + ',"backup_path":' + $env:RECOVERY_RESULT_BACKUP_JSON + '}'
     $temporary = $ResultPath + ".tmp"
     [System.IO.File]::WriteAllText($temporary, $payload, [System.Text.UTF8Encoding]::new($false))
-    Move-Item -LiteralPath $temporary -Destination $ResultPath -Force
+    if ([System.IO.File]::Exists($ResultPath)) {
+        [System.IO.File]::Replace($temporary, $ResultPath, $null)
+    } else { [System.IO.File]::Move($temporary, $ResultPath) }
 }
 function Finish([bool]$Ok, [string]$Detail) { Release-Lock; Write-Result $Ok $Detail }
 function Show-NativeResult([string]$Detail) {
     if ($Relaunch -ne "1") { return }
-    try { (New-Object -ComObject WScript.Shell).Popup($Detail, 0, "Mediatovideo Converter", 16) | Out-Null } catch { }
+    try {
+        $shell = [Activator]::CreateInstance([Type]::GetTypeFromProgID("WScript.Shell"))
+        $null = $shell.Popup($Detail, 0, "Mediatovideo Converter", 16)
+    } catch { }
 }
 
-$deadline = (Get-Date).AddSeconds($WaitSeconds)
-while (Get-Process -Id $ParentPid -ErrorAction SilentlyContinue) {
-    if ((Get-Date) -gt $deadline) {
+$deadline = [DateTime]::UtcNow.AddSeconds($WaitSeconds)
+while ($true) {
+    $running = $false
+    try {
+        $parent = [System.Diagnostics.Process]::GetProcessById($ParentPid)
+        $running = -not $parent.HasExited
+        $parent.Dispose()
+    } catch { }
+    if (-not $running) { break }
+    if ([DateTime]::UtcNow -gt $deadline) {
         Write-Log "recovery: the application did not exit in time; nothing was changed."
         Finish $false "the application did not exit in time"
         Show-NativeResult "The repair stopped: the application is still running."
         exit 1
     }
-    Start-Sleep -Seconds 1
+    [System.Threading.Thread]::Sleep(1000)
 }
 
-try { Move-Item -LiteralPath $Target -Destination $Backup -ErrorAction Stop }
+try { [System.IO.Directory]::Move($Target, $Backup) }
 catch {
     Write-Log "recovery: the current application could not be moved aside; nothing was changed."
     Finish $false "the current application could not be moved aside"
@@ -1198,10 +1216,10 @@ catch {
     exit 1
 }
 
-try { Move-Item -LiteralPath $Candidate -Destination $Target -ErrorAction Stop }
+try { [System.IO.Directory]::Move($Candidate, $Target) }
 catch {
     $restored = $false
-    try { Move-Item -LiteralPath $Backup -Destination $Target -ErrorAction Stop; $restored = $true } catch { }
+    try { [System.IO.Directory]::Move($Backup, $Target); $restored = $true } catch { }
     if ($restored) {
         Write-Log "recovery: the repair could not be installed; the original application was restored."
         Finish $false "the repair could not be installed and the original was restored"
@@ -1214,7 +1232,7 @@ catch {
 }
 
 try {
-    $container = Split-Path -Parent $Candidate
+    $container = [System.IO.Path]::GetDirectoryName($Candidate)
     # Only an empty staging container is removed, exactly like rmdir on macOS.
     # A non-empty directory, such as a candidate staged directly in a shared
     # folder, makes this throw and is left untouched along with its siblings.
@@ -1224,7 +1242,14 @@ Write-Log "recovery: the repair was installed; the previous copy is kept at $Bac
 Finish $true "repair installed"
 
 if ($Relaunch -eq "1") {
-    try { Start-Process -FilePath $RelaunchCommand -ErrorAction Stop }
+    try {
+        $start = [System.Diagnostics.ProcessStartInfo]::new()
+        $start.FileName = $RelaunchCommand
+        $start.WorkingDirectory = $Target
+        $start.UseShellExecute = $true
+        $launched = [System.Diagnostics.Process]::Start($start)
+        if ($null -ne $launched) { $launched.Dispose() }
+    }
     catch {
         Write-Log "recovery: the repaired application could not be relaunched."
         Show-NativeResult "The repair was installed but the application could not start."

@@ -117,6 +117,10 @@ attempt restores the old copy. Progress and the result are written to the
 diagnostic log. The first startup/repair may take longer while files are copied
 and checked; the recovery copy uses additional disk space.
 
+On Windows, helper startup output is also saved beside the repair result in
+the recovery cache as `recovery-result-<id>.helper-startup.log`. Include this
+file with the application diagnostic log when reporting a repair-launch issue.
+
 This is an offline reinstall of the same packaged version. It does not upgrade
 the application or change system Python, Tk, Homebrew, or pip packages. If the
 app is damaged before its first successful startup, the backup was deleted, the

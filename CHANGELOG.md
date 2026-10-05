@@ -23,6 +23,9 @@ All notable changes to Mediatovideo Converter are recorded here.
   neighboring files and the retained application backup.
 - Retain Windows repair-helper startup output and detect an immediate helper
   exit, so launch failures include an exit code and diagnostic file location.
+- Run the Windows helper without a visible console using .NET file/process
+  operations, avoiding PowerShell module-loading stalls under a private profile.
+- Reject a helper that exits without producing its repair result.
 
 ### Limitations
 
