@@ -49,7 +49,9 @@ active log without opening the GUI:
 python run_app.py --log-path
 ```
 
-For a packaged app, use its native executable in place of `python run_app.py`.
+For the macOS packaged app, run its native executable from Terminal with
+`--log-path`. The Windows package has no console output; use **Open diagnostic
+log** or the Windows log location below instead.
 The usual log locations are:
 
 | Platform | Diagnostic log |
