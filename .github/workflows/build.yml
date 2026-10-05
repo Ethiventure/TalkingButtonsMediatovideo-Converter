@@ -138,7 +138,16 @@ jobs:
               for name in ("SystemRoot", "TEMP", "TMP"):
                   if os.environ.get(name):
                       child_env[name] = os.environ[name]
-          status = subprocess.run([str(executable), "--self-test", "--self-test-report", report_path], env=child_env, timeout=90).returncode
+          try:
+              status = subprocess.run([str(executable), "--self-test", "--self-test-report", report_path], env=child_env, timeout=90).returncode
+          finally:
+              # A failed launch must leave evidence in CI as well as on disk.
+              candidates = list(pathlib.Path(os.environ["RUNNER_TEMP"]).rglob("application-debug.log"))
+              if os.name != "nt":
+                  candidates += list((pathlib.Path.home() / "Library" / "Logs").glob("Mediatovideo Converter/application-debug.log"))
+              for log in candidates:
+                  print("Diagnostic log:", log)
+                  print(log.read_text(encoding="utf-8", errors="replace")[-16000:])
           report = json.loads(pathlib.Path(report_path).read_text(encoding="utf-8"))
           assert status == 0, f"frozen self-test exited {status}: {report}"
           assert report.get("ok") is True, f"self-test did not pass: {report}"
@@ -164,6 +173,17 @@ jobs:
               assert resolved.is_relative_to(bundle_root), f"video tool outside the bundle: {resolved}"
           print("frozen self-test report verified:", report_path)
           PY
+
+      - name: Retain frozen smoke-test diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.platform }}-diagnostics
+          path: |
+            ${{ runner.temp }}/selftest.json
+            ${{ runner.temp }}/**/application-debug.log*
+            ~/Library/Logs/Mediatovideo Converter/application-debug.log*
+          if-no-files-found: warn
 
       - name: Package the bundle with symlinks preserved (macOS)
         if: matrix.platform == 'macos'

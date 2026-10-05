@@ -186,6 +186,25 @@ class DiagnosticsStreamTests(DiagnosticsTestCase):
 class DiagnosticsFallbackTests(DiagnosticsTestCase):
     """Location policy: standard path, disclosed fallback, then graceful None."""
 
+    def test_missing_home_directory_still_uses_temporary_log(self) -> None:
+        with mock.patch.object(
+            diagnostics, "_diagnostics_standard_log_path",
+            side_effect=RuntimeError("Could not determine home directory"),
+        ):
+            path = diagnostics.diagnostics_start()
+        self.assertEqual(path, self.fallback_path)
+        self.assertIn("Could not determine home directory", self.logged_text(path))
+
+    def test_location_resolution_failures_are_nonfatal(self) -> None:
+        with mock.patch.object(
+            diagnostics, "_diagnostics_standard_log_path", side_effect=RuntimeError("no home"),
+        ), mock.patch.object(
+            diagnostics, "_diagnostics_fallback_log_path", side_effect=OSError("no temporary path"),
+        ):
+            self.assertIsNone(diagnostics.diagnostics_start())
+            diagnostics.diagnostics_info("still running")
+            self.assertIn("No diagnostic log could be created", diagnostics.diagnostics_recovery_text())
+
     def test_unusable_standard_directory_falls_back_to_temp_and_discloses_it(self) -> None:
         (self.root / "standard").write_text("not a directory", encoding="utf-8")
         path = diagnostics.diagnostics_start()

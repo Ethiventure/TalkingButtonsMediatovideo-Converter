@@ -280,14 +280,18 @@ def diagnostics_start() -> Optional[Path]:
         logger.propagate = False
         _state.logger = logger
 
-        for path, is_fallback in (
-            (_diagnostics_standard_log_path(), False),
-            (_diagnostics_fallback_log_path(), True),
+        for locate_path, is_fallback, location in (
+            (_diagnostics_standard_log_path, False, "per-user log"),
+            (_diagnostics_fallback_log_path, True, "temporary log"),
         ):
             try:
+                # Path.home() can fail in a stripped Windows environment.
+                # Resolve each candidate lazily so that failure still reaches
+                # the temporary fallback, and never prevents application boot.
+                path = locate_path()
                 handler = _diagnostics_build_file_handler(path)
-            except OSError as error:
-                _state.last_error = "{}: {}".format(path, error)
+            except (OSError, RuntimeError) as error:
+                _state.last_error = "{}: {}".format(location, error)
                 continue
             logger.addHandler(handler)
             _state.file_handler = handler
@@ -503,9 +507,12 @@ def diagnostics_recovery_text() -> str:
             location += " (temporary fallback location)"
         location += "."
     else:
-        location = "No diagnostic log could be created; check write access to {}.".format(
-            _diagnostics_standard_log_path().parent
-        )
+        try:
+            location = "No diagnostic log could be created; check write access to {}.".format(
+                _diagnostics_standard_log_path().parent
+            )
+        except (OSError, RuntimeError):
+            location = "No diagnostic log could be created; check the user profile and temporary directory."
 
     requirements = _diagnostics_runtime_requirements()
     if _diagnostics_is_frozen():
