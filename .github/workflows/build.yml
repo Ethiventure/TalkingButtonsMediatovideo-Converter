@@ -130,7 +130,7 @@ jobs:
           # Launch with Python's native process API. MSYS env -i inserts its
           # own Git PATH on Windows, which would invalidate this isolation test.
           "$PYTHON" - "$REPORT" "$BUNDLE" "$BUNDLE_EXECUTABLE" <<'PY'
-          import json, os, pathlib, subprocess, sys
+          import json, os, pathlib, shutil, subprocess, sys
 
           report_path, bundle, executable = sys.argv[1], pathlib.Path(sys.argv[2]), pathlib.Path(sys.argv[3]).resolve()
           child_env = {"PATH": ""}
@@ -142,12 +142,17 @@ jobs:
               status = subprocess.run([str(executable), "--self-test", "--self-test-report", report_path], env=child_env, timeout=90).returncode
           finally:
               # A failed launch must leave evidence in CI as well as on disk.
+              evidence = pathlib.Path("build/smoke-diagnostics")
+              evidence.mkdir(parents=True, exist_ok=True)
+              if pathlib.Path(report_path).is_file():
+                  shutil.copy2(report_path, evidence / "selftest.json")
               candidates = list(pathlib.Path(os.environ["RUNNER_TEMP"]).rglob("application-debug.log"))
               if os.name != "nt":
                   candidates += list((pathlib.Path.home() / "Library" / "Logs").glob("Mediatovideo Converter/application-debug.log"))
-              for log in candidates:
+              for index, log in enumerate(candidates):
                   print("Diagnostic log:", log)
                   print(log.read_text(encoding="utf-8", errors="replace")[-16000:])
+                  shutil.copy2(log, evidence / f"application-debug-{index}.log")
           report = json.loads(pathlib.Path(report_path).read_text(encoding="utf-8"))
           assert status == 0, f"frozen self-test exited {status}: {report}"
           assert report.get("ok") is True, f"self-test did not pass: {report}"
@@ -179,10 +184,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.platform }}-diagnostics
-          path: |
-            ${{ runner.temp }}/selftest.json
-            ${{ runner.temp }}/**/application-debug.log*
-            ~/Library/Logs/Mediatovideo Converter/application-debug.log*
+          path: build/smoke-diagnostics/
           if-no-files-found: warn
 
       - name: Package the bundle with symlinks preserved (macOS)
