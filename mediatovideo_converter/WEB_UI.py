@@ -1096,4 +1096,7 @@ def web_ui_main() -> None:
 
 
 if __name__ == "__main__":
-    web_ui_main()
+    # Developer module launches use the same runtime validation as the app.
+    from run_app import run_app_main
+
+    raise SystemExit(run_app_main())

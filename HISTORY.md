@@ -52,3 +52,16 @@ project history.
   layout, encoding, progress, cancellation, safety, installer, and error flow.
 - Kept the fictional conversion-progress illustration as a clearly labelled
   example rather than presenting it as a real screenshot.
+
+
+## 2026-10-05 — Version 0.4.0 runtime guards and native packaging
+
+- Replaced import-only compatibility acceptance with package version floors
+  and time-bounded Tk/ttk startup probes owned by the runtime module.
+- Added video-tool compatibility checks, isolated native bundle resolution,
+  self-contained PyInstaller builds, dependency manifests, and native CI.
+- Added a unified modular regression harness and real GUI/generated-media
+  smoke testing. Unit checks alone are not treated as rendered UI evidence.
+- Preserved pre-existing local licensing changes outside the GitHub update.
+- Recorded the upstream macOS 27.0 Tk dialog limitation; selected package
+  versions are prerequisites rather than a promise against OS regressions.

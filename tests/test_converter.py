@@ -192,7 +192,13 @@ class ConverterPlanningTests(unittest.TestCase):
     def _write_fake_tool(path: Path, body: str) -> None:
         """Write an executable Python command used as a deterministic test tool."""
 
-        path.write_text(f"#!{sys.executable}\n{body}", encoding="utf-8")
+        preflight = (
+            "import sys\n"
+            f"if '-version' in sys.argv: print('{path.name} version 8.1.2'); sys.exit(0)\n"
+            "if '-encoders' in sys.argv: print(' V..... libx264\\n A..... aac'); sys.exit(0)\n"
+            "if '-demuxers' in sys.argv: print(' D concat'); sys.exit(0)\n"
+        )
+        path.write_text(f"#!{sys.executable}\n{preflight}{body}", encoding="utf-8")
         path.chmod(path.stat().st_mode | stat.S_IXUSR)
 
 

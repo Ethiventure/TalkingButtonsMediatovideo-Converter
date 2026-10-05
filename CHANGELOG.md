@@ -2,6 +2,26 @@
 
 All notable changes to Mediatovideo Converter are recorded here.
 
+## [0.4.0] - 2026-10-05
+
+### Changed
+
+- Require Python 3.14.8+, Tk 9.1.0+ on macOS / 9.0.4+ on Windows, and
+  FFmpeg/FFprobe 8.1.2+ with the application's required features.
+- Probe real Tk list/progress widgets under a deadline before accepting a
+  runtime; reject obsolete Apple Tk and broken or stalled installations.
+- Validate direct application launches as well as native source launchers.
+- Package Python/Tk and video tools into native apps, prefer packaged tools,
+  and fail clearly if a native bundle is damaged.
+- Pin PyInstaller, record dependency provenance, and add native build CI,
+  modular regression coverage, and real GUI/generated-video smoke testing.
+
+### Limitations
+
+- Version checks and self-contained packages cannot guarantee compatibility
+  with future operating-system changes. macOS 27.0 has a documented upstream
+  Tk dialog issue and requires workflow-specific validation.
+
 ## [0.3.0] - 2026-07-18
 
 ### Added

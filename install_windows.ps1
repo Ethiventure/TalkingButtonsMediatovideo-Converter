@@ -1,5 +1,11 @@
 # Mediatovideo Converter Windows prerequisite installer and launcher.
-# This script is called by run_windows.bat so every action remains visible.
+# Called by run_windows.bat so every action remains visible.
+#
+# This script never decides which Python, Tk or FFmpeg versions are acceptable:
+# it asks scripts/check_runtime.py (policy from mediatovideo_converter/runtime.py)
+# and "run_app.py --check-video-tools" (policy from converter.py) to probe each
+# candidate under a watchdog. Its own job is to enumerate candidates and to
+# install or update the tooling when no candidate passes.
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
@@ -7,6 +13,8 @@ Set-StrictMode -Version Latest
 $script:StepNumber = 0
 $script:PythonExecutable = $null
 $script:PythonPrefixArguments = @()
+$script:CheckRuntimeScript = Join-Path $PSScriptRoot "scripts\check_runtime.py"
+$script:LastProbeOutput = ""
 
 function Write-InstallerHeader {
     Clear-Host
@@ -61,32 +69,86 @@ function Refresh-ProcessPath {
     $env:Path = (@($machinePath, $userPath) + $extraPaths | Where-Object { $_ }) -join ";"
 }
 
+# --- Runtime probing (policy lives in scripts/check_runtime.py) ------------
+
+function Get-CheckerHost {
+    # Any working Python can drive the checker; the checker itself probes the
+    # real candidates as child processes.
+    $candidates = @(
+        @{ Executable = "py"; Arguments = @("-3") },
+        @{ Executable = "python"; Arguments = @() },
+        @{ Executable = "python3"; Arguments = @() },
+        @{ Executable = "py"; Arguments = @() }
+    )
+    foreach ($candidate in $candidates) {
+        $command = Get-Command $candidate.Executable -ErrorAction SilentlyContinue
+        if (-not $command) {
+            continue
+        }
+        $null = & $command.Source @($candidate.Arguments) -c "import sys" 2>$null
+        if ($LASTEXITCODE -eq 0) {
+            return @{ Executable = $command.Source; Arguments = $candidate.Arguments }
+        }
+    }
+    return $null
+}
+
+function Invoke-RuntimeChecker {
+    param([Parameter(Mandatory = $true)][string[]]$CheckerArguments)
+    $checkerHost = Get-CheckerHost
+    if (-not $checkerHost) {
+        return $null
+    }
+    $output = & $checkerHost.Executable @($checkerHost.Arguments) $script:CheckRuntimeScript @CheckerArguments 2>&1
+    return @{
+        ExitCode = $LASTEXITCODE
+        Output   = (($output | Out-String).Trim())
+    }
+}
+
+function Get-RuntimeRequirementsText {
+    $result = Invoke-RuntimeChecker -CheckerArguments @("--print-requirements")
+    if ($result -and $result.Output) {
+        return $result.Output
+    }
+    return "the required Python and Tk versions"
+}
+
 function Test-PythonCandidate {
     param(
         [Parameter(Mandatory = $true)][string]$Executable,
         [string[]]$PrefixArguments = @()
     )
-    try {
-        $command = Get-Command $Executable -ErrorAction Stop
-        & $command.Source @PrefixArguments -c "import sys, tkinter; raise SystemExit(0 if sys.version_info >= (3, 9) else 1)" *> $null
-        if ($LASTEXITCODE -eq 0) {
-            $script:PythonExecutable = $command.Source
-            $script:PythonPrefixArguments = $PrefixArguments
-            return $true
-        }
-    }
-    catch {
+    $command = Get-Command $Executable -ErrorAction SilentlyContinue
+    if (-not $command) {
         return $false
     }
+    $checkerArguments = @("--check-runtime", "--python", $command.Source)
+    foreach ($value in $PrefixArguments) {
+        $checkerArguments += "--python-arg=$value"
+    }
+    $result = Invoke-RuntimeChecker -CheckerArguments $checkerArguments
+    if (-not $result) {
+        return $false
+    }
+    if ($result.ExitCode -eq 0) {
+        $script:PythonExecutable = $command.Source
+        $script:PythonPrefixArguments = $PrefixArguments
+        return $true
+    }
+    $script:LastProbeOutput = $result.Output
     return $false
 }
 
 function Find-CompatiblePython {
     $candidates = @(
+        @{ Executable = "py"; Arguments = @("-3.14") },
+        @{ Executable = "python3.14"; Arguments = @() },
         @{ Executable = "python"; Arguments = @() },
         @{ Executable = "python3"; Arguments = @() },
-        @{ Executable = "py"; Arguments = @("-3.14") },
-        @{ Executable = "py"; Arguments = @("-3") }
+        @{ Executable = "py"; Arguments = @("-3") },
+        @{ Executable = "$env:LOCALAPPDATA\Programs\Python\Python314\python.exe"; Arguments = @() },
+        @{ Executable = "$env:ProgramFiles\Python314\python.exe"; Arguments = @() }
     )
     foreach ($candidate in $candidates) {
         if (Test-PythonCandidate -Executable $candidate.Executable -PrefixArguments $candidate.Arguments) {
@@ -95,6 +157,8 @@ function Find-CompatiblePython {
     }
     return $false
 }
+
+# --- Python installation ---------------------------------------------------
 
 function Require-WinGet {
     if (Get-Command winget -ErrorAction SilentlyContinue) {
@@ -112,7 +176,7 @@ function Find-PythonManager {
     foreach ($name in @("pymanager", "py")) {
         $command = Get-Command $name -ErrorAction SilentlyContinue
         if ($command) {
-            & $command.Source help install *> $null
+            $null = & $command.Source help install 2>$null
             if ($LASTEXITCODE -eq 0) {
                 return $command.Source
             }
@@ -124,7 +188,7 @@ function Find-PythonManager {
     )
     foreach ($path in $managerPaths) {
         if (Test-Path $path) {
-            & $path help install *> $null
+            $null = & $path help install 2>$null
             if ($LASTEXITCODE -eq 0) {
                 return $path
             }
@@ -134,7 +198,8 @@ function Find-PythonManager {
 }
 
 function Install-WindowsPython {
-    Write-InstallerStep "Python 3.9+ with Tkinter was not found; installing Python."
+    $requirements = Get-RuntimeRequirementsText
+    Write-InstallerStep "Python and Tk were missing or outdated; installing or updating them ($requirements)."
     Require-WinGet
     & winget install 9NQ7512CXL7T -e --accept-package-agreements --accept-source-agreements --disable-interactivity
     if ($LASTEXITCODE -ne 0) {
@@ -152,28 +217,39 @@ function Install-WindowsPython {
             -Problem "The Python install manager finished installing but could not be started." `
             -Action "Restart Windows once, then run run_windows.bat again."
     }
+    # "install 3.14" resolves to the newest stable 3.14.x and is also the
+    # supported way to replace an older or broken 3.14 installation.
     & $manager install 3.14
     if ($LASTEXITCODE -ne 0) {
         Stop-InstallerError `
             -Stage "Installing Python runtime" `
-            -Problem "Python 3.14 could not be installed." `
+            -Problem "Python 3.14 could not be installed or updated." `
             -Action "Check the internet connection, then run this launcher again." `
             -Details "Python install manager exit code: $LASTEXITCODE"
     }
     Refresh-ProcessPath
-    if (-not (Find-CompatiblePython)) {
-        Stop-InstallerError `
-            -Stage "Verifying Python" `
-            -Problem "Python installed, but Python 3.9+ with Tkinter still cannot be loaded." `
-            -Action "Restart Windows, then run run_windows.bat again. If it persists, repair Python from Windows Installed Apps."
+    if (Find-CompatiblePython) {
+        Write-InstallerSuccess "Python and Tkinter are installed and working."
+        return
     }
-    Write-InstallerSuccess "Python and Tkinter are installed and working."
+    if ($script:LastProbeOutput) {
+        Write-Host $script:LastProbeOutput -ForegroundColor DarkGray
+    }
+    Stop-InstallerError `
+        -Stage "Verifying Python" `
+        -Problem "Python was installed or updated, but it still does not meet the required version and features." `
+        -Action "Restart Windows, then run run_windows.bat again. If it persists, repair Python from Windows Installed Apps."
 }
 
+# --- FFmpeg (version and capability policy lives in converter.py) ---------
+
 function Find-VideoTools {
-    $ffmpeg = Get-Command ffmpeg -ErrorAction SilentlyContinue
-    $ffprobe = Get-Command ffprobe -ErrorAction SilentlyContinue
-    return ($null -ne $ffmpeg -and $null -ne $ffprobe)
+    if (-not $script:PythonExecutable) {
+        return $false
+    }
+    $prefix = $script:PythonPrefixArguments
+    & $script:PythonExecutable @prefix (Join-Path $PSScriptRoot "run_app.py") --check-video-tools *> $null
+    return ($LASTEXITCODE -eq 0)
 }
 
 function Add-WinGetFFmpegToPath {
@@ -182,7 +258,8 @@ function Add-WinGetFFmpegToPath {
         "$env:ProgramFiles\WinGet\Packages"
     ) | Where-Object { Test-Path $_ }
     foreach ($root in $searchRoots) {
-        $ffmpeg = Get-ChildItem -Path $root -Filter ffmpeg.exe -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+        $packages = Get-ChildItem -Path $root -Directory -Filter "Gyan.FFmpeg*" -ErrorAction SilentlyContinue
+        $ffmpeg = $packages | Get-ChildItem -Filter ffmpeg.exe -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
         if ($ffmpeg -and (Test-Path (Join-Path $ffmpeg.DirectoryName "ffprobe.exe"))) {
             $env:Path = "$($ffmpeg.DirectoryName);$env:Path"
             return
@@ -191,9 +268,19 @@ function Add-WinGetFFmpegToPath {
 }
 
 function Install-WindowsFFmpeg {
-    Write-InstallerStep "FFmpeg or FFprobe was not found; installing the video tools."
+    Write-InstallerStep "A compatible FFmpeg/FFprobe pair was not found; installing or updating FFmpeg."
     Require-WinGet
-    & winget install --id Gyan.FFmpeg -e --source winget --accept-package-agreements --accept-source-agreements --disable-interactivity
+    # An installed-but-old build must be upgraded; a plain install would be a
+    # no-op and leave the capability check failing.
+    # An unrelated FFmpeg on PATH says nothing about whether WinGet's package
+    # is installed. Query the exact package before choosing install or upgrade.
+    & winget list --id Gyan.FFmpeg -e --source winget --accept-source-agreements *> $null
+    if ($LASTEXITCODE -eq 0) {
+        & winget upgrade --id Gyan.FFmpeg -e --source winget --accept-package-agreements --accept-source-agreements --disable-interactivity | Out-Host
+    }
+    else {
+        & winget install --id Gyan.FFmpeg -e --source winget --accept-package-agreements --accept-source-agreements --disable-interactivity | Out-Host
+    }
     if ($LASTEXITCODE -ne 0) {
         Stop-InstallerError `
             -Stage "Installing FFmpeg" `
@@ -202,31 +289,50 @@ function Install-WindowsFFmpeg {
             -Details "WinGet exit code: $LASTEXITCODE"
     }
     Refresh-ProcessPath
-    if (-not (Find-VideoTools)) {
-        Add-WinGetFFmpegToPath
+    Add-WinGetFFmpegToPath
+    if (Find-VideoTools) {
+        Write-InstallerSuccess "FFmpeg and FFprobe are installed and working."
+        return
     }
-    if (-not (Find-VideoTools)) {
-        Stop-InstallerError `
-            -Stage "Verifying FFmpeg" `
-            -Problem "FFmpeg installed, but ffmpeg.exe and ffprobe.exe could not both be located." `
-            -Action "Restart Windows, then run run_windows.bat again."
+    $prefix = $script:PythonPrefixArguments
+    & $script:PythonExecutable @prefix (Join-Path $PSScriptRoot "run_app.py") --check-video-tools
+    Stop-InstallerError `
+        -Stage "Verifying FFmpeg" `
+        -Problem "FFmpeg was installed or updated, but it still does not meet the required version and features." `
+        -Action "Run 'winget upgrade Gyan.FFmpeg' in a terminal, then run run_windows.bat again."
+}
+
+# --- Top level ------------------------------------------------------------
+
+function Find-PackagedApp {
+    # A frozen build carries its own Python, Tk and video tools, so it is always
+    # preferred over an install that would touch the user's machine.
+    foreach ($candidate in @(
+            (Join-Path $PSScriptRoot "dist\Mediatovideo Converter.exe"),
+            (Join-Path $PSScriptRoot "dist\Mediatovideo Converter\Mediatovideo Converter.exe"),
+            (Join-Path $PSScriptRoot "Mediatovideo Converter.exe")
+        )) {
+        if (Test-Path $candidate -PathType Leaf) {
+            return $candidate
+        }
     }
-    Write-InstallerSuccess "FFmpeg and FFprobe are installed and working."
+    return $null
 }
 
 function Install-WindowsPrerequisites {
-    Write-InstallerStep "Checking Python 3.9+ and Tkinter."
+    $requirements = Get-RuntimeRequirementsText
+    Write-InstallerStep "Checking Python and Tkinter ($requirements)."
+    Refresh-ProcessPath
     if (Find-CompatiblePython) {
         Write-InstallerSuccess "Compatible Python and Tkinter found."
     }
     else {
         Install-WindowsPython
     }
-
     Write-InstallerStep "Checking FFmpeg and FFprobe."
-    Refresh-ProcessPath
+    Add-WinGetFFmpegToPath
     if (Find-VideoTools) {
-        Write-InstallerSuccess "FFmpeg and FFprobe found."
+        Write-InstallerSuccess "Compatible FFmpeg and FFprobe found."
     }
     else {
         Install-WindowsFFmpeg
@@ -235,6 +341,23 @@ function Install-WindowsPrerequisites {
 }
 
 function Start-MediatovideoConverter {
+    $packagedApp = Find-PackagedApp
+    if ($packagedApp) {
+        Write-InstallerStep "Starting the packaged Mediatovideo Converter build."
+        Set-Location $PSScriptRoot
+        & $packagedApp
+        if ($LASTEXITCODE -ne 0) {
+            Stop-InstallerError `
+                -Stage "Running Mediatovideo Converter" `
+                -Problem "The packaged application stopped unexpectedly." `
+                -Action "Read the error shown above. Run this launcher again after correcting it." `
+                -Details "Application exit code: $LASTEXITCODE"
+        }
+        Write-Host ""
+        Write-InstallerSuccess "Mediatovideo Converter closed normally."
+        return
+    }
+
     Write-InstallerStep "Starting Mediatovideo Converter."
     Set-Location $PSScriptRoot
     $prefixArguments = $script:PythonPrefixArguments
@@ -251,5 +374,7 @@ function Start-MediatovideoConverter {
 }
 
 Write-InstallerHeader
-Install-WindowsPrerequisites
+if (-not (Find-PackagedApp)) {
+    Install-WindowsPrerequisites
+}
 Start-MediatovideoConverter

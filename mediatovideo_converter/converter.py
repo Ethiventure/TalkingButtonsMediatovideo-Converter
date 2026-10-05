@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -25,10 +26,30 @@ from .models import (
 )
 
 ConversionEvent = Callable[[str, dict[str, object]], None]
+# Command runner used by the tool verification helpers. Tests inject a fake so
+# version and capability policy can be checked without a real FFmpeg build.
+ToolRunner = Callable[[Sequence[str]], tuple[int, str]]
 _INVALID_FILENAME = re.compile(r"[<>:\"/\\|?*\x00-\x1f]")
 _VALIDATION_EVENT_INTERVAL_SECONDS = 0.2
 _ENCODING_EVENT_INTERVAL_SECONDS = 0.2
 _ENCODING_EVENT_MIN_FRACTION_STEP = 0.005
+
+# Video-tool policy. These values live in exactly one module; the build tool
+# and the frozen application read them through the getters below. Python and
+# Tk requirements belong to the runtime module, not here.
+CONVERTER_BUNDLED_TOOLS_DIRNAME = "video_tools"
+CONVERTER_MINIMUM_FFMPEG_VERSION = (8, 1, 2)
+CONVERTER_REQUIRED_ENCODERS = ("libx264", "aac")
+CONVERTER_REQUIRED_DEMUXERS = ("concat",)
+_CONVERTER_TOOL_VERSION_PATTERN = re.compile(
+    r"^(?P<tool>ffmpeg|ffprobe)\s+version\s+(?P<version>\S+)", re.IGNORECASE
+)
+_CONVERTER_NUMERIC_VERSION_PATTERN = re.compile(r"(?<!\d)(\d+)\.(\d+)(?:\.(\d+))?")
+_CONVERTER_LISTING_FLAGS_PATTERN = re.compile(r"^[A-Za-z.]{1,10}$")
+# Verified reports are cached per binary identity so a manual folder choice
+# cannot bypass the minimum versions, yet one conversion does not re-probe the
+# tools for every clip group.
+_CONVERTER_TOOL_REPORT_CACHE: dict[tuple[object, ...], dict[str, object]] = {}
 
 
 class ConversionCancelled(Exception):
@@ -39,26 +60,94 @@ class FFmpegNotFoundError(RuntimeError):
     """Raised when FFmpeg and FFprobe cannot be located."""
 
 
+class FFmpegCompatibilityError(RuntimeError):
+    """Raised when FFmpeg or FFprobe is too old or lacks a required feature."""
+
+
 class ConversionProcessError(RuntimeError):
     """Raised with a complete user-facing explanation of a group failure."""
 
 
+def _converter_version_text(version: Sequence[int] | None) -> str:
+    """Render a version tuple such as ``(8, 1, 2)`` as ``"8.1.2"``."""
+
+    return ".".join(str(part) for part in version) if version else "unknown"
+
+
+def converter_bundled_tools_dirname() -> str:
+    """Return the in-bundle folder that holds the packaged video tools."""
+
+    return CONVERTER_BUNDLED_TOOLS_DIRNAME
+
+
+def converter_minimum_versions() -> dict[str, str]:
+    """Return the supported minimum FFmpeg and FFprobe versions.
+
+    Python and Tk policy is deliberately absent: the runtime module owns it.
+    """
+
+    minimum = _converter_version_text(CONVERTER_MINIMUM_FFMPEG_VERSION)
+    return {"ffmpeg": minimum, "ffprobe": minimum}
+
+
+def _converter_frozen_root() -> Path | None:
+    """Return the PyInstaller extraction root while running frozen, else None."""
+
+    if not getattr(sys, "frozen", False):
+        return None
+    extraction_root = getattr(sys, "_MEIPASS", None)
+    return Path(extraction_root) if extraction_root else None
+
+
 def converter_find_tools(ffmpeg_directory: Path | None = None) -> tuple[str, str]:
-    """Locate FFmpeg and FFprobe in a selected directory or on ``PATH``."""
+    """Locate FFmpeg and FFprobe using the packaged-application policy.
+
+    Resolution order is fixed in this module so every entry point agrees:
+
+    1. An explicitly selected folder (the user override in the interface).
+    2. The packaged ``video_tools`` folder inside a frozen application.
+    3. ``PATH``, which is only used when running from a source checkout.
+
+    A frozen application deliberately never falls back to ``PATH``. A missing
+    or empty bundled pair is reported as an incomplete installation so the app
+    cannot silently run a different FFmpeg build than the one it shipped with.
+    """
 
     executable_suffix = ".exe" if os.name == "nt" else ""
     if ffmpeg_directory:
         directory = ffmpeg_directory.expanduser().resolve()
-        ffmpeg = directory / f"ffmpeg{executable_suffix}"
-        ffprobe = directory / f"ffprobe{executable_suffix}"
-        if ffmpeg.is_file() and ffprobe.is_file():
-            return str(ffmpeg), str(ffprobe)
+        ffmpeg, ffprobe = _converter_require_tool_pair(directory, executable_suffix)
+        if ffmpeg and ffprobe:
+            return ffmpeg, ffprobe
         raise FFmpegNotFoundError(
             error_messages_format(
                 "Checking video tools",
                 "FFmpeg and FFprobe were not both found in the selected folder.",
-                "Select the folder containing both executables, or restart the app "
-                "with run_windows.bat or run_macos.command to install them.",
+                "Select the folder containing both executables, or install the "
+                "application again so its packaged video tools are restored.",
+                error_messages_path(directory),
+            )
+        )
+
+    frozen_root = _converter_frozen_root()
+    if getattr(sys, "frozen", False):
+        if frozen_root is None:
+            raise FFmpegNotFoundError(error_messages_format(
+                "Checking packaged video tools", "The application bundle root is unavailable.",
+                "Install the application again from a fresh download."
+            ))
+        directory = frozen_root / CONVERTER_BUNDLED_TOOLS_DIRNAME
+        ffmpeg, ffprobe = _converter_require_tool_pair(
+            directory, executable_suffix, require_nonempty=True
+        )
+        if ffmpeg and ffprobe:
+            return ffmpeg, ffprobe
+        raise FFmpegNotFoundError(
+            error_messages_format(
+                "Checking packaged video tools",
+                "The packaged FFmpeg and FFprobe tools are missing or incomplete.",
+                "Install the application again from a fresh download, or select a "
+                "folder containing both executables in the app.",
                 error_messages_path(directory),
             )
         )
@@ -70,12 +159,107 @@ def converter_find_tools(ffmpeg_directory: Path | None = None) -> tuple[str, str
             error_messages_format(
                 "Checking video tools",
                 "FFmpeg and FFprobe are required but could not both be found.",
-                "Close the app and start it with run_windows.bat or "
-                "run_macos.command so the missing tools can be installed. You may "
-                "also select an existing FFmpeg bin folder in the app.",
+                "Install the packaged application, install FFmpeg for this "
+                "platform, or select an existing FFmpeg bin folder in the app.",
             )
         )
     return ffmpeg_path, ffprobe_path
+
+
+def converter_verify_tools(
+    ffmpeg: str,
+    ffprobe: str,
+    runner: ToolRunner | None = None,
+) -> dict[str, object]:
+    """Reject an FFmpeg/FFprobe pair below 8.1.2 or missing a required feature.
+
+    Version strings alone are not enough: the encoders and demuxer the
+    conversion pipeline actually uses are checked too, so an old or cut-down
+    build is reported before any user media is touched. ``runner`` lets tests
+    supply canned tool output.
+    """
+
+    required_version = CONVERTER_MINIMUM_FFMPEG_VERSION
+    tool_runner = runner or _converter_default_tool_runner
+    report: dict[str, object] = {
+        "minimum_version": _converter_version_text(required_version),
+        "tools": {},
+        "features": {},
+    }
+    for tool_name, tool_path in (("ffmpeg", ffmpeg), ("ffprobe", ffprobe)):
+        version, banner, configuration = _converter_tool_version(
+            tool_runner, tool_path, tool_name
+        )
+        if version is None or version < required_version:
+            raise FFmpegCompatibilityError(
+                _converter_tool_problem(
+                    f"{tool_name} {_converter_version_text(version)} is not supported",
+                    f"detected {_converter_version_text(version)}; "
+                    f"required {_converter_version_text(required_version)} or newer",
+                    f"{tool_name}: {tool_path}\n{banner or 'no version output'}",
+                )
+            )
+        report["tools"][tool_name] = {  # type: ignore[index]
+            "version": _converter_version_text(version),
+            "banner": banner,
+            "configuration": configuration,
+        }
+
+    for flag, features in (
+        ("-encoders", CONVERTER_REQUIRED_ENCODERS),
+        ("-demuxers", CONVERTER_REQUIRED_DEMUXERS),
+    ):
+        listing = _converter_tool_listing(tool_runner, ffmpeg, flag)
+        for feature in features:
+            if not _converter_listing_contains(listing, feature):
+                raise FFmpegCompatibilityError(
+                    _converter_tool_problem(
+                        f"This FFmpeg build does not include {feature}",
+                        f"missing: {feature}",
+                        f"ffmpeg: {ffmpeg}",
+                    )
+                )
+            report["features"][feature] = True  # type: ignore[index]
+    return report
+
+
+def _converter_tool_problem(problem: str, detail: str, technical: str) -> str:
+    """Format a video-tool policy failure with the shared stage/action wording."""
+
+    return error_messages_format(
+        "Checking video tools",
+        f"{problem}.",
+        "Install the supported FFmpeg build (the packaged application includes "
+        "it) and try again.",
+        f"{detail}\n{technical}",
+    )
+
+
+def _converter_verified_tools(ffmpeg: str, ffprobe: str) -> dict[str, object]:
+    """Verify the tool pair once per binary identity and cache the report.
+
+    Every conversion path calls this, so a hand-picked or outdated folder
+    cannot bypass the minimum versions after the interface has opened.
+    """
+
+    key = (ffmpeg, ffprobe) + tuple(
+        _converter_file_identity(path) for path in (ffmpeg, ffprobe)
+    )
+    report = _CONVERTER_TOOL_REPORT_CACHE.get(key)
+    if report is None:
+        report = converter_verify_tools(ffmpeg, ffprobe)
+        _CONVERTER_TOOL_REPORT_CACHE[key] = report
+    return report
+
+
+def _converter_file_identity(path: str) -> tuple[int, int]:
+    """Return (size, mtime) so a replaced binary is re-verified."""
+
+    try:
+        details = os.stat(path)
+    except OSError:
+        return (0, 0)
+    return (details.st_size, int(details.st_mtime))
 
 
 def converter_plan_targets(
@@ -108,6 +292,7 @@ def converter_convert(
     """Validate and convert all groups, continuing past individual failures."""
 
     ffmpeg, ffprobe = converter_find_tools(options.ffmpeg_directory)
+    _converter_verified_tools(ffmpeg, ffprobe)
     targets = converter_plan_targets(groups, options)
     completed: list[Path] = []
     failures: list[str] = []
@@ -262,6 +447,7 @@ def converter_convert_mkv_to_mp4(
         )
 
     ffmpeg, ffprobe = converter_find_tools(ffmpeg_directory)
+    _converter_verified_tools(ffmpeg, ffprobe)
     _converter_check_cancel(cancel_event)
     duration = _converter_probe_media(ffprobe, source)
     if duration is None:
@@ -693,3 +879,111 @@ def _converter_subprocess_window_options() -> dict[str, object]:
     if os.name == "nt":
         return {"creationflags": subprocess.CREATE_NO_WINDOW}
     return {}
+
+
+def _converter_require_tool_pair(
+    directory: Path, executable_suffix: str, require_nonempty: bool = False
+) -> tuple[str | None, str | None]:
+    """Return the FFmpeg/FFprobe pair from a folder when both are usable.
+
+    ``require_nonempty`` is reserved for the packaged bundle: a zero-length
+    executable is treated as a damaged installation. A user-selected folder
+    keeps the original existence-only check so an override the user provided
+    is reported by the tools themselves rather than by this helper.
+    """
+
+    ffmpeg = directory / f"ffmpeg{executable_suffix}"
+    ffprobe = directory / f"ffprobe{executable_suffix}"
+    if not (ffmpeg.is_file() and ffprobe.is_file()):
+        return None, None
+    if require_nonempty:
+        for candidate in (ffmpeg, ffprobe):
+            try:
+                if candidate.stat().st_size == 0:
+                    return None, None
+            except OSError:
+                return None, None
+    return str(ffmpeg), str(ffprobe)
+
+
+def _converter_default_tool_runner(command: Sequence[str]) -> tuple[int, str]:
+    """Run a tool command, returning its exit code with stdout and stderr."""
+
+    result = subprocess.run(
+        list(command),
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+        **_converter_subprocess_window_options(),
+    )
+    return result.returncode, f"{result.stdout or ''}{result.stderr or ''}"
+
+
+def _converter_parse_numeric_version(token: str) -> tuple[int, int, int] | None:
+    """Extract a comparable ``x.y.z`` from a tool version token."""
+
+    match = _CONVERTER_NUMERIC_VERSION_PATTERN.search(token)
+    if not match:
+        return None
+    return (int(match.group(1)), int(match.group(2)), int(match.group(3) or 0))
+
+
+def _converter_tool_version(
+    runner: ToolRunner, tool_path: str, tool_name: str
+) -> tuple[tuple[int, int, int] | None, str, str]:
+    """Return (version, banner, configuration) for one FFmpeg-family tool."""
+
+    returncode, output = runner([tool_path, "-version"])
+    banner = ""
+    configuration = ""
+    for line in output.splitlines():
+        stripped = line.strip()
+        if stripped.casefold().startswith(f"{tool_name} version"):
+            banner = stripped
+        elif stripped.startswith("configuration:") and not configuration:
+            configuration = stripped
+    if returncode != 0 or not banner:
+        return None, banner, configuration
+    match = _CONVERTER_TOOL_VERSION_PATTERN.match(banner)
+    if not match:
+        return None, banner, configuration
+    return _converter_parse_numeric_version(match.group("version")), banner, configuration
+
+
+def _converter_tool_listing(runner: ToolRunner, ffmpeg: str, flag: str) -> str:
+    """Return one FFmpeg capability listing or raise a clear error."""
+
+    returncode, output = runner([ffmpeg, "-hide_banner", flag])
+    if returncode != 0:
+        raise FFmpegCompatibilityError(
+            error_messages_format(
+                "Checking video tools",
+                f"FFmpeg could not list its {flag.lstrip('-')}.",
+                "Install the supported FFmpeg build (the packaged application "
+                "includes it) and try again.",
+                f"ffmpeg: {ffmpeg}\n{_converter_tail(output)}",
+            )
+        )
+    return output
+
+
+def _converter_listing_contains(listing: str, name: str) -> bool:
+    """Return True when an FFmpeg ``-encoders``/``-demuxers`` listing has *name*."""
+
+    for line in listing.splitlines():
+        parts = line.split()
+        if (
+            len(parts) >= 2
+            and _CONVERTER_LISTING_FLAGS_PATTERN.match(parts[0])
+            and parts[1] == name
+        ):
+            return True
+    return False
+
+
+def _converter_tail(text: str, line_limit: int = 12) -> str:
+    """Return the last few non-empty lines for a diagnostic message."""
+
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    return "\n".join(lines[-line_limit:])

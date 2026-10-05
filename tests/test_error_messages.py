@@ -40,9 +40,13 @@ class ErrorMessageTests(unittest.TestCase):
             tools.mkdir()
             ffprobe = tools / "ffprobe"
             ffmpeg = tools / "ffmpeg"
-            ffprobe.write_text("#!/bin/sh\nprintf '1.0\\n'\n", encoding="utf-8")
+            ffprobe.write_text("#!/bin/sh\nif [ \"$1\" = \"-version\" ]; then echo 'ffprobe version 8.1.2'; else echo 1.0; fi\n", encoding="utf-8")
             ffmpeg.write_text(
-                "#!/bin/sh\nprintf 'No space left on device\\n'\nexit 1\n",
+                "#!/bin/sh\nif [ \"$1\" = -hide_banner ]; then shift; fi\ncase \"$1\" in\n"
+                "-version) echo 'ffmpeg version 8.1.2'; exit 0;;\n"
+                "-encoders) printf ' V..... libx264\\n A..... aac\\n'; exit 0;;\n"
+                "-demuxers) echo ' D concat'; exit 0;;\nesac\n"
+                "printf 'No space left on device\\n'\nexit 1\n",
                 encoding="utf-8",
             )
             ffprobe.chmod(0o755)

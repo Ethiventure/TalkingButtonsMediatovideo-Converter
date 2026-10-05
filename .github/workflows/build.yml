@@ -1,0 +1,172 @@
+name: Build native applications
+
+# The packaged application must carry its own Python, Tk, FFmpeg and FFprobe.
+# Every job therefore runs the regression suite, builds natively, and then runs
+# the frozen executable's self-test with PATH cleared so the result cannot be
+# satisfied by tools installed on the runner.
+
+on:
+  push:
+    branches: [main, master, "codex/runtime-*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PYINSTALLER_VERSION: "6.22.3"
+  PYTHON_VERSION: "3.14.8"
+
+jobs:
+  tests:
+    name: Tests (ubuntu)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Run the regression suite
+        run: python scripts/test_harness.py
+
+  build:
+    name: Build (${{ matrix.runner }})
+    needs: tests
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            platform: macos
+          - runner: windows-latest
+            platform: windows
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Python, Tk, FFmpeg and PyInstaller (macOS)
+        if: matrix.platform == 'macos'
+        run: |
+          set -euo pipefail
+          brew update
+          brew install python@3.14 python-tk@3.14 ffmpeg
+          PYTHON="$(brew --prefix python@3.14)/bin/python3.14"
+          FFMPEG_BIN="$(brew --prefix ffmpeg)/bin"
+          "$PYTHON" -m venv .build-venv
+          PYTHON="$PWD/.build-venv/bin/python"
+          "$PYTHON" -m pip install "pyinstaller==${PYINSTALLER_VERSION}"
+          "$PYTHON" -c "import tkinter; print('Tk', tkinter.TkVersion)"
+          "$FFMPEG_BIN/ffmpeg" -version
+          echo "PYTHON=$PYTHON" >> "$GITHUB_ENV"
+          echo "FFMPEG_LICENSE=$(brew --prefix ffmpeg)/LICENSE.md" >> "$GITHUB_ENV"
+          echo "FFMPEG_BIN=$FFMPEG_BIN" >> "$GITHUB_ENV"
+          echo "BUNDLE=dist/Mediatovideo Converter.app" >> "$GITHUB_ENV"
+          echo "BUNDLE_EXECUTABLE=dist/Mediatovideo Converter.app/Contents/MacOS/Mediatovideo Converter" >> "$GITHUB_ENV"
+          echo "ARCHIVE=Mediatovideo-Converter-macos-arm64.zip" >> "$GITHUB_ENV"
+
+      - name: Install Python, Tk, FFmpeg and PyInstaller (Windows)
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          # Pinned upstream archive and checksum from Microsoft's WinGet manifest:
+          # manifests/g/Gyan/FFmpeg/8.1.2/Gyan.FFmpeg.installer.yaml
+          $archive = Join-Path $env:RUNNER_TEMP "ffmpeg-8.1.2.zip"
+          Invoke-WebRequest "https://github.com/GyanD/codexffmpeg/releases/download/8.1.2/ffmpeg-8.1.2-full_build.zip" -OutFile $archive
+          if ((Get-FileHash $archive -Algorithm SHA256).Hash -ne "B8CDEFAB5F50590A076C27C2B56B0294A0E6154FADED28BA1BA05EBC4F801F57") { throw "FFmpeg archive checksum mismatch" }
+          Expand-Archive $archive -DestinationPath .ci-tools
+          $ffmpegDir = (Resolve-Path ".ci-tools/ffmpeg-8.1.2-full_build/bin").Path
+          "FFMPEG_LICENSE=$((Resolve-Path '.ci-tools/ffmpeg-8.1.2-full_build/LICENSE').Path)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "FFMPEG_BIN=$ffmpegDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "BUNDLE=dist/Mediatovideo Converter" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "BUNDLE_EXECUTABLE=dist/Mediatovideo Converter/Mediatovideo Converter.exe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "ARCHIVE=Mediatovideo-Converter-windows-x64.zip" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - uses: actions/setup-python@v5
+        if: matrix.platform == 'windows'
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install PyInstaller (Windows)
+        if: matrix.platform == 'windows'
+        run: |
+          python -m pip install --upgrade pip "pyinstaller==${PYINSTALLER_VERSION}"
+          echo "PYTHON=python" >> "$GITHUB_ENV"
+
+      - name: Run the regression suite
+        run: '"$PYTHON" scripts/test_harness.py'
+
+      - name: Exercise Windows launcher without installing anything
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: ./scripts/test_windows_launcher.ps1
+
+      - name: Build the native bundle
+        run: |
+          set -euo pipefail
+          "$PYTHON" scripts/build_app.py --ffmpeg-bin "$FFMPEG_BIN" --ffmpeg-license "$FFMPEG_LICENSE" --output-dir dist
+          test -f "dist/$(basename "$BUNDLE").manifest.json"
+
+      - name: Run the frozen self-test with PATH cleared
+        timeout-minutes: 10
+        run: |
+          set -uo pipefail
+          REPORT="$RUNNER_TEMP/selftest.json"
+          rm -f "$REPORT"
+          # No PATH at all: the self-test must resolve its tools from the
+          # bundle, and its report records the PATH it saw.
+          if [ "${{ matrix.platform }}" = "macos" ]; then
+            env -i "$BUNDLE_EXECUTABLE" --self-test --self-test-report "$REPORT"
+          else
+            env -i SYSTEMROOT="${SYSTEMROOT:-}" TEMP="${TEMP:-/tmp}" TMP="${TMP:-/tmp}" \
+              "$BUNDLE_EXECUTABLE" --self-test --self-test-report "$REPORT"
+          fi
+          STATUS=$?
+          if [ ! -f "$REPORT" ]; then
+            echo "The frozen application wrote no self-test report (exit $STATUS)."
+            exit 1
+          fi
+          "$PYTHON" - "$REPORT" "$BUNDLE" "$STATUS" <<'PY'
+          import json, pathlib, sys
+
+          report_path, bundle, status = sys.argv[1], pathlib.Path(sys.argv[2]), int(sys.argv[3])
+          report = json.loads(pathlib.Path(report_path).read_text(encoding="utf-8"))
+          assert status == 0, f"frozen self-test exited {status}: {report}"
+          assert report.get("ok") is True, f"self-test did not pass: {report}"
+          assert report.get("frozen") is True, f"self-test did not run frozen: {report}"
+          assert not report.get("path"), f"self-test saw an inherited PATH entry: {report.get('path')!r}"
+          video = report.get("video") or {}
+          paths = []
+          if isinstance(video, dict):
+              paths = [video.get("ffmpeg"), video.get("ffprobe")]
+          if not any(paths) and isinstance(video, dict):
+              paths = [value for value in video.values() if isinstance(value, str)]
+          paths = [path for path in paths if path]
+          assert len(paths) == 2, f"self-test report must list both video tool paths: {report}"
+          bundle_root = bundle.resolve()
+          for path in paths:
+              resolved = pathlib.Path(path).resolve()
+              assert resolved.is_relative_to(bundle_root), f"video tool outside the bundle: {resolved}"
+          print("frozen self-test report verified:", report_path)
+          PY
+
+      - name: Package the bundle with symlinks preserved (macOS)
+        if: matrix.platform == 'macos'
+        run: ditto -c -k --sequesterRsrc --keepParent "$BUNDLE" "$ARCHIVE"
+
+      - name: Package the bundle with symlinks preserved (Windows)
+        if: matrix.platform == 'windows'
+        run: tar.exe -a -c -f "$ARCHIVE" -C dist "$(basename "$BUNDLE")"
+
+      - name: Upload the native bundle and its manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.platform }}-bundle
+          path: |
+            ${{ env.ARCHIVE }}
+            dist/*.manifest.json
+          if-no-files-found: error

@@ -8,25 +8,34 @@ graphical interface.
 
 ## Installation
 
-For the easiest setup, download this project as a ZIP from GitHub, then run
-the launcher for your computer:
+The preferred distribution is a **self-contained native app**. The native build
+carries its own Python, Tcl/Tk, FFmpeg, FFprobe, and required shared libraries.
+It does not need Homebrew, a system Python, or video tools on PATH. Native build
+archives are produced by the GitHub **Build native applications** workflow and
+are retained as workflow artifacts after all checks pass. They are separate
+from GitHub's **Download ZIP**, which contains source code only.
 
-1. Open the GitHub project page.
-2. Click **Code**.
-3. Click **Download ZIP**.
-4. Unzip the downloaded folder.
+- macOS: extract the archive and open `Mediatovideo Converter.app`.
+- Windows: extract the entire archive, keep its files together, and open
+  `Mediatovideo Converter.exe` inside the application folder.
 
-![Where to find Download ZIP on GitHub](docs/github-download-zip-location.png)
+For a source checkout, double-click `run_macos.command` or `run_windows.bat`.
+These launchers verify the runtime, repair/install missing or outdated
+prerequisites, and keep a terminal visible for errors. Their minimum package
+versions are Python **3.14.8**, Tk **9.1.0 on macOS** or **9.0.4 on Windows**,
+and FFmpeg/FFprobe **8.1.2**. Newer stable versions are accepted only when the
+startup checks also pass. The check constructs a Tk window with the actual
+list/progress widget types and exercises the event loop under a deadline;
+successful `import tkinter` alone is insufficient. Video-tool checks verify
+versions and the encoding/demuxing features used by this application.
 
-Then:
-
-- Windows: unzip the downloaded folder, then double-click `run_windows.bat`.
-  The first run will install any missing tools for you.
-- macOS: unzip the downloaded folder, then double-click `run_macos.command`.
-  The first run will install any missing tools for you.
-
-If your Mac asks whether to open the file, choose Open. If Windows shows a
-security warning, choose Run anyway.
+These package baselines match the selected Homebrew runtime and the official
+Windows Python runtime. They are not a guarantee against future OS changes.
+In particular, [Python's 3.14.8 release notes](https://www.python.org/downloads/release/python-3148/)
+report Tk dialog hangs on macOS 27.0 across current Tk versions. The startup
+probe and release smoke tests detect startup/widget failures, but do not prove
+that every native file chooser or menu workflow is unaffected. Bundling fixes
+which packages are used; OS-specific dialog behavior still needs testing.
 
 ## Real application screenshots
 
@@ -297,9 +306,49 @@ folders and filenames only; it contains no user media or video frames.
 ## Tests
 
 ```sh
-python -m unittest discover -s tests -v
+python scripts/test_harness.py
+# Also exercise the actual GUI and a generated-video conversion:
+python scripts/test_harness.py --integration
 ```
 
 The test suite covers date discovery, day/child grouping, fallback layouts,
 portable naming, collision handling, folder and single-file FFmpeg
 orchestration, error clarity, and both native installer contracts.
+
+
+## Building the self-contained app
+
+Build on the target operating system and CPU architecture, using a runtime
+that passes the same checks as startup. A virtual environment alone does not
+supply a separate Tk installation. PyInstaller packages the validated Python
+and Tk libraries into the native application.
+
+```sh
+python -m pip install '.[build]'
+python scripts/build_app.py --ffmpeg-bin /path/to/ffmpeg/bin
+```
+
+The build requires both FFmpeg and FFprobe, records package versions, binary
+hashes, and tool build configuration in `BUILD-MANIFEST.json`, and includes
+third-party notices. Review the dependency licenses and corresponding-source
+requirements before redistributing a build. The existing application license
+still applies independently of the bundled tools' licenses.
+
+The native workflow runs the modular regression harness, builds the app, and
+runs its `--self-test` with an empty PATH. This realizes the actual main window
+and MKV-to-MP4 dialog and converts generated media; no personal videos are used.
+On Windows, keep the entire packaged application folder together. On macOS,
+keep the `.app` bundle intact. A damaged bundle produces a clear startup error
+and never silently switches to system video tools. A deliberately selected
+FFmpeg folder remains an explicit override and is checked before use.
+
+For a diagnostic run of either the source launcher or the native executable:
+
+```sh
+python run_app.py --check-runtime
+python run_app.py --self-test --self-test-report build/self-test.json
+```
+
+For a native app, substitute its executable for `python run_app.py`. Always
+impose an overall timeout when automating GUI smoke tests; the release workflow
+does so. Windowed startup failures are also written to a per-user startup log.

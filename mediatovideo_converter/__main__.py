@@ -1,7 +1,7 @@
-"""Module entry point for ``python -m mediatovideo_converter``."""
+"""Route module launches through the same validated application entry point."""
 
-from .WEB_UI import web_ui_main
+from run_app import run_app_main
 
 
 if __name__ == "__main__":
-    web_ui_main()
+    raise SystemExit(run_app_main())
