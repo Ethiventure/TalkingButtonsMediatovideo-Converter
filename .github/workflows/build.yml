@@ -53,6 +53,11 @@ jobs:
         run: |
           set -euo pipefail
           brew update
+          # The hosted image links OpenSSL 1.1; unlink that obsolete CLI alias
+          # before installing the current Python dependencies on this runner.
+          if brew list --versions openssl@1.1 >/dev/null 2>&1; then
+            brew unlink openssl@1.1
+          fi
           brew install python@3.14 python-tk@3.14 ffmpeg
           PYTHON="$(brew --prefix python@3.14)/bin/python3.14"
           FFMPEG_BIN="$(brew --prefix ffmpeg)/bin"

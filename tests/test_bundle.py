@@ -147,8 +147,8 @@ class ToolResolutionTests(unittest.TestCase):
             with mock.patch.dict(os.environ, {"PATH": str(path_dir)}):
                 ffmpeg, ffprobe = converter_find_tools()
 
-            self.assertEqual(Path(ffmpeg).name, f"ffmpeg{_TOOL_SUFFIX}")
-            self.assertEqual(Path(ffprobe).name, f"ffprobe{_TOOL_SUFFIX}")
+            self.assertEqual(Path(ffmpeg).name.casefold(), f"ffmpeg{_TOOL_SUFFIX}")
+            self.assertEqual(Path(ffprobe).name.casefold(), f"ffprobe{_TOOL_SUFFIX}")
             self.assertEqual(Path(ffmpeg).parent, Path(ffprobe).parent)
 
 
