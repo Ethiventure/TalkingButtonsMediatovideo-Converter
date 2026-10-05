@@ -19,6 +19,8 @@ All notable changes to Mediatovideo Converter are recorded here.
 - Match the Windows repair dialog's native structure layout and retain
   diagnostics when the custom dialog API is unavailable.
 - Audit original ZIP member names before Windows normalizes separators.
+- Remove a repair staging container only when it is empty, preserving
+  neighboring files and the retained application backup.
 
 ### Limitations
 

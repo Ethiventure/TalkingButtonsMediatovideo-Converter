@@ -859,6 +859,11 @@ class SwapHelperTests(RecoveryTestCase):
         self.assertIn("it is kept at $backup", text)
         self.assertIn("the original was kept as the backup copy", text)
 
+    def test_powershell_helper_only_removes_an_empty_staging_container(self) -> None:
+        text = recovery._POWERSHELL_HELPER
+        self.assertIn("[System.IO.Directory]::Delete($container, $false)", text)
+        self.assertNotIn("Remove-Item -LiteralPath $container", text)
+
     def test_powershell_helper_writes_bom_free_json_and_rolls_back(self) -> None:
         text = recovery._POWERSHELL_HELPER
 
@@ -957,6 +962,131 @@ class SwapHelperTests(RecoveryTestCase):
         self.assertEqual(code, 0)
         self.assertFalse(container.exists())
 
+    @unittest.skipUnless(sys.platform == "win32", "native Windows helper test")
+    def test_windows_helper_removes_only_an_empty_staging_container(self) -> None:
+        helper_dir = self.root / "helper"
+        helper_dir.mkdir()
+        target = self.root / "target"
+        target.mkdir()
+        (target / "old.txt").write_text("old", encoding="utf-8")
+        container = self.root / "container"
+        bundle = container / "Mediatovideo Converter"
+        bundle.mkdir(parents=True)
+        (bundle / "new.txt").write_text("new", encoding="utf-8")
+        backup = target.with_name("target.previous-container")
+        result = self.root / "container-result.json"
+        lock = self.root / "container.lock"
+        lock.write_text("pid=999999\noperation=foreign\n", encoding="utf-8")
+        helper = recovery._recovery_write_helper(helper_dir, relaunch=False)
+        completed = subprocess.run(
+            [
+                str(recovery._recovery_windows_powershell()),
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(helper),
+                "-ParentPid",
+                "2147483646",
+                "-Candidate",
+                str(bundle),
+                "-Target",
+                str(target),
+                "-Backup",
+                str(backup),
+                "-LogPath",
+                "",
+                "-ResultPath",
+                str(result),
+                "-LockPath",
+                str(lock),
+                "-WaitSeconds",
+                "30",
+                "-Relaunch",
+                "0",
+                "-RelaunchCommand",
+                str(target / "Mediatovideo Converter.exe"),
+            ],
+            check=False,
+            timeout=120,
+            env={
+                **os.environ,
+                "RECOVERY_RESULT_TARGET_JSON": json.dumps(str(target)),
+                "RECOVERY_RESULT_BACKUP_JSON": json.dumps(str(backup)),
+            },
+        )
+
+        self.assertEqual(completed.returncode, 0)
+        self.assertFalse(container.exists())
+        self.assertTrue((target / "new.txt").is_file())
+        self.assertTrue((backup / "old.txt").is_file())
+        self.assertEqual(json.loads(result.read_text(encoding="utf-8"))["ok"], True)
+
+    @unittest.skipUnless(sys.platform == "win32", "native Windows helper test")
+    def test_windows_helper_keeps_siblings_in_a_shared_staging_folder(self) -> None:
+        helper_dir = self.root / "helper"
+        helper_dir.mkdir()
+        target = self.root / "target"
+        target.mkdir()
+        (target / "old.txt").write_text("old", encoding="utf-8")
+        # A candidate staged directly in a shared folder: the parent also holds
+        # the fixture's own result, backup and keep file, so it must survive.
+        candidate = self.root / "Mediatovideo Converter"
+        candidate.mkdir()
+        (candidate / "new.txt").write_text("new", encoding="utf-8")
+        keep = self.root / "keep.txt"
+        keep.write_text("keep", encoding="utf-8")
+        backup = target.with_name("target.previous-shared")
+        result = self.root / "shared-result.json"
+        lock = self.root / "shared.lock"
+        lock.write_text("pid=999999\noperation=foreign\n", encoding="utf-8")
+        helper = recovery._recovery_write_helper(helper_dir, relaunch=False)
+        completed = subprocess.run(
+            [
+                str(recovery._recovery_windows_powershell()),
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(helper),
+                "-ParentPid",
+                "2147483646",
+                "-Candidate",
+                str(candidate),
+                "-Target",
+                str(target),
+                "-Backup",
+                str(backup),
+                "-LogPath",
+                "",
+                "-ResultPath",
+                str(result),
+                "-LockPath",
+                str(lock),
+                "-WaitSeconds",
+                "30",
+                "-Relaunch",
+                "0",
+                "-RelaunchCommand",
+                str(target / "Mediatovideo Converter.exe"),
+            ],
+            check=False,
+            timeout=120,
+            env={
+                **os.environ,
+                "RECOVERY_RESULT_TARGET_JSON": json.dumps(str(target)),
+                "RECOVERY_RESULT_BACKUP_JSON": json.dumps(str(backup)),
+            },
+        )
+
+        self.assertEqual(completed.returncode, 0)
+        self.assertTrue(self.root.is_dir())
+        self.assertTrue(keep.is_file())
+        self.assertTrue(result.is_file())
+        self.assertTrue(backup.is_dir())
+        self.assertTrue(lock.is_file())
+        self.assertEqual(json.loads(result.read_text(encoding="utf-8"))["ok"], True)
+
     @unittest.skipUnless(sys.platform == "win32", "native Windows process query")
     def test_windows_pid_check_does_not_terminate_the_process(self) -> None:
         self.assertTrue(recovery._recovery_pid_alive(os.getpid()))
@@ -1022,8 +1152,13 @@ class SwapHelperTests(RecoveryTestCase):
         self.assertEqual(payload["target_path"], str(target))
         self.assertEqual(payload["backup_path"], str(backup))
         self.assertIn("\\", payload["backup_path"])
-        # A lock owned by another process must survive the helper.
+        # A lock owned by another process must survive the helper, and nothing
+        # else in the fixture root may be removed either.
         self.assertEqual(lock.read_text(encoding="utf-8").splitlines()[0], "pid=999999")
+        self.assertTrue(result.is_file())
+        self.assertTrue(backup.is_dir())
+        self.assertTrue(target.is_dir())
+        self.assertTrue(result.parent.is_dir())
 
 
 if __name__ == "__main__":

@@ -114,3 +114,8 @@ project history.
 - Corrected the Windows TaskDialog structure packing against Microsoft's native definitions and recorded native API failure stages for debugging.
 - Audited raw ZIP member names before Windows normalizes separators; rejected literal backslashes and NUL bytes.
 - Corrected native Windows test setup for helper lock ownership and isolated native dialog selection from mocked fallback tests.
+
+### Version 0.4.2 Windows helper cleanup correction
+
+- Native Windows CI passed the repair dialog button gate and exposed recursive staging-parent cleanup.
+- Replaced that cleanup with an atomic empty-directory removal, preserving neighboring files even when the staging layout changes; retained native helper and sibling-preservation checks.

@@ -1204,7 +1204,10 @@ catch {
 
 try {
     $container = Split-Path -Parent $Candidate
-    if ($container -ne "") { Remove-Item -LiteralPath $container -Force -Recurse -ErrorAction SilentlyContinue }
+    # Only an empty staging container is removed, exactly like rmdir on macOS.
+    # A non-empty directory, such as a candidate staged directly in a shared
+    # folder, makes this throw and is left untouched along with its siblings.
+    if ($container -ne "") { [System.IO.Directory]::Delete($container, $false) }
 } catch { }
 Write-Log "recovery: the repair was installed; the previous copy is kept at $Backup"
 Finish $true "repair installed"
