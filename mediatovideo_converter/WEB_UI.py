@@ -1153,6 +1153,9 @@ class MediaToVideoApp:
         if self._ready_announced or not self._interface_is_drawn():
             return
         self._ready_announced = True
+        self._status.set(
+            "Application should be running now. Choose a source folder; open diagnostic log for help."
+        )
         path = _diagnostics_log_path()
         recovery = _diagnostics_recovery_text()
         self._append_log(_READY_MESSAGE, mirror=False)

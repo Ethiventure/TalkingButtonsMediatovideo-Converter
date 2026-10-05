@@ -81,7 +81,13 @@ class DiagnosticsSessionTests(DiagnosticsTestCase):
         self.assertIn("python={}".format(platform.python_version()), text)
         self.assertIn("os=", text)
         self.assertIn("frozen=False", text)
-        self.assertIn("requires=python>=3.14.8 tk>=9.1.0", text)
+        requirements = runtime.runtime_get_requirements()
+        self.assertIn(
+            "requires=python>={} tk>={}".format(
+                requirements["python_text"], requirements["tk_text"]
+            ),
+            text,
+        )
         self.assertIn("INFO", self.stderr.getvalue())
 
     def test_info_records_message_and_field_values(self) -> None:

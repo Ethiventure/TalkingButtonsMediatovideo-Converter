@@ -11,6 +11,7 @@ import importlib.abc
 import io
 import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -221,6 +222,16 @@ class FrozenTransportTests(unittest.TestCase):
 class OldInterpreterTests(unittest.TestCase):
     """The real old interpreter is rejected before Tk is ever touched."""
 
+    def isolated_environment(self) -> dict:
+        """Return an environment whose diagnostic log lands in a temp directory."""
+        home = tempfile.mkdtemp(prefix="mediatovideo-test-home-")
+        self.addCleanup(shutil.rmtree, home, ignore_errors=True)
+        environment = dict(os.environ)
+        environment["HOME"] = home
+        environment["XDG_STATE_HOME"] = os.path.join(home, "state")
+        environment["LOCALAPPDATA"] = os.path.join(home, "localappdata")
+        return environment
+
     def test_version_gate_stops_the_probe_before_tkinter(self) -> None:
         class PoisonFinder(importlib.abc.MetaPathFinder):
             def find_spec(self, fullname, path=None, target=None):  # type: ignore[no-untyped-def]
@@ -246,7 +257,7 @@ class OldInterpreterTests(unittest.TestCase):
     def test_run_app_cli_rejects_the_real_old_interpreter(self) -> None:
         result = subprocess.run(
             [sys.executable, str(RUN_APP), "--check-runtime"],
-            capture_output=True, text=True, timeout=90,
+            capture_output=True, text=True, timeout=90, env=self.isolated_environment(),
         )
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("Stage:   Python version", result.stderr)
@@ -258,6 +269,7 @@ class OldInterpreterTests(unittest.TestCase):
             result = subprocess.run(
                 [sys.executable, str(RUN_APP), "--runtime-probe-report", str(report)],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=90,
+                env=self.isolated_environment(),
             )
             self.assertEqual(result.returncode, 1)
             payload = json.loads(report.read_text(encoding="utf-8"))
@@ -270,11 +282,23 @@ class RunAppPreflightTests(unittest.TestCase):
 
     def test_gui_module_is_not_imported_when_the_runtime_is_unsupported(self) -> None:
         import run_app  # noqa: PLC0415
+        from mediatovideo_converter import diagnostics  # noqa: PLC0415
 
         sys.modules.pop("mediatovideo_converter.WEB_UI", None)
         error = runtime.RuntimeUnsupportedError("Python version", "Unsupported Python", "Install a supported runtime.")
-        with mock.patch.object(runtime, 'runtime_check', side_effect=error), redirect_stderr(io.StringIO()):
-            code = run_app.run_app_main([])
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(
+            diagnostics,
+            "_diagnostics_standard_log_path",
+            return_value=Path(temporary) / "application-debug.log",
+        ), mock.patch.object(
+            diagnostics,
+            "_diagnostics_fallback_log_path",
+            return_value=Path(temporary) / "fallback" / "application-debug.log",
+        ), mock.patch.object(runtime, "runtime_check", side_effect=error), redirect_stderr(io.StringIO()):
+            try:
+                code = run_app.run_app_main([])
+            finally:
+                diagnostics.diagnostics_shutdown()
         self.assertNotIn("mediatovideo_converter.WEB_UI", sys.modules)
         self.assertEqual(code, 2)
 
@@ -315,6 +339,23 @@ class RunAppPreflightTests(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertIn("OK: Compatible Python and Tkinter found", result.stdout)
+
+    def test_log_path_cli_keeps_stdout_clean(self) -> None:
+        environment = dict(os.environ)
+        home = tempfile.mkdtemp(prefix="mediatovideo-logpath-")
+        self.addCleanup(shutil.rmtree, home, ignore_errors=True)
+        environment["HOME"] = home
+        environment["XDG_STATE_HOME"] = os.path.join(home, "state")
+        environment["LOCALAPPDATA"] = os.path.join(home, "localappdata")
+        result = subprocess.run(
+            [sys.executable, str(RUN_APP), "--log-path"],
+            capture_output=True, text=True, timeout=90, env=environment,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        lines = [line for line in result.stdout.splitlines() if line.strip()]
+        self.assertEqual(len(lines), 1)
+        self.assertTrue(lines[0].endswith("application-debug.log"), lines[0])
+        self.assertIn("Application startup", result.stderr)
 
 
 if __name__ == "__main__":

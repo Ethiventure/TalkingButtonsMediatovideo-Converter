@@ -264,6 +264,7 @@ class ReadyAnnouncementTests(UiTestCase):
             },
         )
         self.assertTrue(app.ready_announced)
+        self.assertIn("Application should be running now.", app._status.get())
         # The ready record must use the same Tk query as the runtime/selftest.
         self.assertIn(("package", "require", "Tk"), app._root.tk.calls)
         self.assertIn(READY_MESSAGE + "\n", app._log.lines)
