@@ -39,6 +39,12 @@ def run_app_parser() -> argparse.ArgumentParser:
                         help="write the self-test JSON report to PATH (implies --self-test)")
     parser.add_argument("--log-path", action="store_true",
                         help="print the active diagnostic log path without opening the GUI")
+    parser.add_argument("--prepare-recovery", action="store_true",
+                        help="verify a packaged app and save its offline repair backup")
+    parser.add_argument("--repair-report", metavar="PATH", default=None,
+                        help="internal: start offline repair and write its launch result")
+    parser.add_argument("--repair-no-relaunch", action="store_true",
+                        help="internal: repair without reopening the app (native tests)")
     return parser
 
 
@@ -58,7 +64,7 @@ def run_app_check_runtime() -> int:
     return 0
 
 
-def run_app_video_tools() -> Tuple[int, str]:
+def run_app_video_tools() -> Tuple[int, object]:
     """Check FFmpeg/FFprobe with the policy owned by ``converter.py``."""
     try:
         from mediatovideo_converter.converter import (
@@ -79,7 +85,9 @@ def run_app_video_tools() -> Tuple[int, str]:
         report = converter_verify_tools(ffmpeg, ffprobe)
     except (FFmpegNotFoundError, FFmpegCompatibilityError) as error:
         diagnostics.diagnostics_exception("Video tool compatibility check failed", error)
-        return 1, str(error).strip()
+        # Keep the converter's typed failure for recovery eligibility. Text
+        # alone loses the distinction between missing and incompatible tools.
+        return 1, error
     tools = report.get("tools", {})
     diagnostics.diagnostics_info(
         "Video tools verified", ffmpeg=ffmpeg, ffprobe=ffprobe,
@@ -101,6 +109,7 @@ def run_app_launch_gui() -> int:
     if status != 0:
         runtime.runtime_report_failure(failure)
         return 2
+    run_app_prepare_recovery()
     try:
         from mediatovideo_converter.WEB_UI import web_ui_main
     except ModuleNotFoundError as error:
@@ -120,6 +129,41 @@ def run_app_launch_gui() -> int:
     diagnostics.diagnostics_info("Opening application window", version=__version__)
     web_ui_main()
     return 0
+
+
+def run_app_prepare_recovery() -> int:
+    """Ask the recovery module to preserve a healthy packaged application.
+
+    A failed backup must not prevent normal use. The recovery module owns cache
+    location, identity and validation; the launcher only calls its public API.
+    """
+    if not runtime.runtime_is_frozen():
+        return 0
+    from mediatovideo_converter.recovery import recovery_seed
+
+    try:
+        result = recovery_seed()
+    except Exception as error:
+        diagnostics.diagnostics_exception("Offline repair backup unavailable", error)
+        return 1
+    diagnostics.diagnostics_info("Offline repair backup", **result)
+    return 0 if result.get("ok") else 1
+
+
+def run_app_repair(report_path: str, *, relaunch: bool = True) -> int:
+    """Transport the recovery module's launch result for native automation.
+
+    This bypasses normal preflight because the target's bundled tools may be
+    missing. The recovery module validates the target and replacement itself.
+    """
+    import json
+    from mediatovideo_converter.recovery import recovery_start
+
+    result = recovery_start(relaunch=relaunch)
+    destination = Path(report_path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+    return 0 if result.get("ok") else 1
 
 
 def run_app_self_test(report_path: Optional[str]) -> int:
@@ -153,7 +197,9 @@ def run_app_main(argv: Optional[Sequence[str]] = None) -> int:
     diagnostics.diagnostics_info(diagnostics.diagnostics_recovery_text())
     status = 1
     try:
-        if args.log_path:
+        if args.repair_report:
+            status = run_app_repair(args.repair_report, relaunch=not args.repair_no_relaunch)
+        elif args.log_path:
             path = diagnostics.diagnostics_log_path()
             if sys.stdout is not None:
                 print(str(path) if path else "Diagnostic log unavailable: no writable location.")
@@ -162,6 +208,20 @@ def run_app_main(argv: Optional[Sequence[str]] = None) -> int:
             status = run_app_self_test(args.self_test_report)
         elif args.check_runtime:
             status = run_app_check_runtime()
+        elif args.prepare_recovery:
+            if not runtime.runtime_is_frozen():
+                diagnostics.diagnostics_info(
+                    "Offline repair preparation requires a packaged application; "
+                    "source checkouts use run_macos.command or run_windows.bat.")
+                status = 1
+            else:
+                status = run_app_check_runtime()
+                if status == 0:
+                    status, failure = run_app_video_tools()
+                    if status != 0:
+                        runtime.runtime_report_failure(failure)
+                    else:
+                        status = run_app_prepare_recovery()
         elif args.check_video_tools:
             status, failure = run_app_video_tools()
             if status != 0:

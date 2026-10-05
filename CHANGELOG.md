@@ -2,6 +2,27 @@
 
 All notable changes to Mediatovideo Converter are recorded here.
 
+## [0.4.2] - 2026-10-05
+
+### Added
+
+- Native startup **Fix automatically** action for damaged bundled video tools
+  when an exact-version verified offline recovery package is available.
+- Complete-app recovery backup, archive integrity/path validation, staged native
+  self-test, detached replacement, rollback, and diagnostic repair results.
+- Native damaged-package recovery verification in the modular test harness/CI.
+
+### Fixed
+
+- Defer the macOS native Quit callback before entering a modal busy confirmation,
+  using the workaround for CPython issue 158053; Cmd-Q now confirms active folder work.
+
+### Limitations
+
+- Offline recovery requires a previous successful packaged startup or explicit
+  `--prepare-recovery`; first-run damage still requires a fresh complete install.
+- This release does not establish that all future macOS/Tk dialog issues are fixed.
+
 ## [0.4.1] - 2026-10-05
 
 ### Added

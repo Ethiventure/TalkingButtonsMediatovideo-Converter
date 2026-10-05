@@ -13,6 +13,7 @@ def test_harness_main() -> int:
     """Run all test modules; real runtime checks are explicit and time bounded."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--integration', action='store_true', help='Also exercise the actual GUI and video tools.')
+    parser.add_argument('--package', type=Path, help='Also restore a disposable damaged native package.')
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     sys.path.insert(0, str(root))
@@ -25,6 +26,17 @@ def test_harness_main() -> int:
             success = (result.returncode == 0) and success
         except subprocess.TimeoutExpired:
             print('Integration smoke test timed out after 90 seconds.', file=sys.stderr)
+            success = False
+    if args.package:
+        try:
+            result = subprocess.run([
+                sys.executable, str(root / 'scripts' / 'test_packaged_recovery.py'),
+                '--bundle', str(args.package.resolve()),
+                '--report-dir', str(root / 'build' / 'smoke-diagnostics' / 'recovery'),
+            ], cwd=root, timeout=600)
+            success = (result.returncode == 0) and success
+        except (OSError, subprocess.TimeoutExpired) as error:
+            print(f'Native recovery test failed: {error}', file=sys.stderr)
             success = False
     return 0 if success else 1
 

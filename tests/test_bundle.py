@@ -241,6 +241,26 @@ class ConversionGateTests(unittest.TestCase):
 class BuilderTests(unittest.TestCase):
     """Verify the packaging command, guard rails, manifest, and notices."""
 
+    @unittest.skipUnless(sys.platform == "darwin", "native macOS reporter compiler")
+    def test_startup_reporter_compiles_as_signed_foreground_app(self) -> None:
+        """A real applet retains an independent identity when Tk is broken."""
+        import plistlib
+        import subprocess
+
+        with tempfile.TemporaryDirectory() as temporary:
+            app = Path(temporary) / "Fixture.app"
+            (app / "Contents" / "Frameworks").mkdir(parents=True)
+            helper = build_app.build_app_dialog_helper(app)
+            with (helper / "Contents" / "Info.plist").open("rb") as stream:
+                info = plistlib.load(stream)
+            self.assertEqual(info["CFBundleIdentifier"],
+                             build_app.MACOS_BUNDLE_IDENTIFIER + ".startup-reporter")
+            self.assertNotIn("LSUIElement", info)
+            self.assertTrue((helper / "Contents" / "Resources" / "Scripts" / "main.scpt").is_file())
+            checked = subprocess.run(["/usr/bin/codesign", "--verify", "--deep", "--strict", str(helper)],
+                                     capture_output=True, timeout=60)
+            self.assertEqual(checked.returncode, 0, checked.stderr)
+
     def test_pyinstaller_command_is_onedir_windowed_with_bundled_tools(self) -> None:
         command = build_app.build_app_pyinstaller_command(
             "App",

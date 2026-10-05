@@ -34,8 +34,12 @@ Windows Python runtime. They are not a guarantee against future OS changes.
 In particular, [Python's 3.14.8 release notes](https://www.python.org/downloads/release/python-3148/)
 report Tk dialog hangs on macOS 27.0 across current Tk versions. The startup
 probe and release smoke tests detect startup/widget failures, but do not prove
-that every native file chooser or menu workflow is unaffected. Bundling fixes
-which packages are used; OS-specific dialog behavior still needs testing.
+that every native file chooser or menu workflow is unaffected. Version 0.4.2
+defers the application's native Quit handler until Tk returns from the menu
+callback, following the workaround in
+[CPython issue 158053](https://github.com/python/cpython/issues/158053). This also
+lets Cmd-Q use the running folder-operation confirmation. OS-specific dialog behavior
+still needs testing when the operating system or toolkit changes.
 
 ## Diagnostic logs and startup status
 
@@ -91,6 +95,44 @@ A ready message confirms window initialization, not every later interaction.
 To report an issue, reproduce it once, copy the current diagnostic log (and
 relevant rotated backups), and include the app version, operating system,
 whether you used the package or source launcher, and what you clicked.
+
+## Automatic repair of a damaged packaged app
+
+After the packaged application passes its startup checks, it saves a complete
+offline recovery copy outside the application folder. If a later startup finds
+missing or incompatible bundled video tools, the native error popup offers
+**Fix automatically** when a verified recovery copy exists for that exact app
+version, operating system, and CPU architecture. The primary native button is
+**Fix automatically** on macOS and Windows. If the Windows custom dialog API is
+unavailable, a fallback Yes/No dialog explains that **Yes** runs the repair.
+The message identifies the application being repaired.
+
+Repair checks the backup's SHA-256, validates archive paths and symlinks, restores
+the complete package to a staging folder, checks its manifest and video-tool
+hashes, and runs the app's real GUI/generated-video self-test with PATH cleared.
+On macOS it also verifies the restored code signature. Only after those checks
+pass does a separate operating-system helper wait for the failed app to exit,
+replace it, retain the old copy as a backup, and reopen it. A failed replacement
+attempt restores the old copy. Progress and the result are written to the
+diagnostic log. The first startup/repair may take longer while files are copied
+and checked; the recovery copy uses additional disk space.
+
+This is an offline reinstall of the same packaged version. It does not upgrade
+the application or change system Python, Tk, Homebrew, or pip packages. If the
+app is damaged before its first successful startup, the backup was deleted, the
+backup fails validation, or the destination is not writable, install a fresh
+complete package. The button cannot recover an executable that cannot start at
+all. Source checkouts continue to use the existing installers through
+`run_macos.command` or `run_windows.bat`.
+
+The local checksum detects accidental corruption. It is not a trust boundary
+against someone who can replace both the backup and its metadata in your user
+account. Keep the recovery folder and the old application backup until you have
+confirmed the restored app works. No private media files are part of the backup.
+
+To prepare the offline backup explicitly after installing a package, run its
+native executable with `--prepare-recovery`. The native CI harness also tests
+restoration of a disposable damaged copy; it never damages your installed app.
 
 ## Real application screenshots
 
@@ -369,11 +411,14 @@ folders and filenames only; it contains no user media or video frames.
 python scripts/test_harness.py
 # Also exercise the actual GUI and a generated-video conversion:
 python scripts/test_harness.py --integration
+# Restore a disposable damaged native app (on its target operating system):
+python scripts/test_harness.py --package "/path/to/Mediatovideo Converter.app"
 ```
 
 The test suite covers date discovery, day/child grouping, fallback layouts,
 portable naming, collision handling, folder and single-file FFmpeg
-orchestration, error clarity, and both native installer contracts.
+orchestration, error clarity, both native installer contracts, deferred macOS
+Quit handling, and automatic-repair integrity and failure paths.
 
 
 ## Building the self-contained app

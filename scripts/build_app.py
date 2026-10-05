@@ -14,6 +14,7 @@ import argparse
 import hashlib
 import json
 import platform
+import plistlib
 import shutil
 import subprocess
 import sys
@@ -240,6 +241,41 @@ def build_app_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def build_app_dialog_helper(output_path: Path) -> Path:
+    """Compile and sign the independent macOS startup reporter.
+
+    The runtime module owns the constant argv-only dialog source and helper
+    name. A foreground applet has a stable LaunchServices identity, so failures
+    and the repair button remain usable when Tk cannot start.
+    """
+    from mediatovideo_converter.runtime import (
+        runtime_dialog_helper_name,
+        runtime_dialog_helper_source,
+    )
+
+    helper = output_path / "Contents" / "Frameworks" / runtime_dialog_helper_name()
+    compiled = subprocess.run([
+        "/usr/bin/osacompile", "-o", str(helper), "-e", runtime_dialog_helper_source(),
+    ], check=False, capture_output=True, text=True, timeout=60)
+    if compiled.returncode != 0:
+        raise BuildError(f"Startup reporter compilation failed: {compiled.stderr.strip()}")
+    plist = helper / "Contents" / "Info.plist"
+    with plist.open("rb") as stream:
+        info = plistlib.load(stream)
+    info.update(CFBundleIdentifier=MACOS_BUNDLE_IDENTIFIER + ".startup-reporter",
+                CFBundleName="Mediatovideo Startup Reporter",
+                CFBundleDisplayName="Mediatovideo Startup Reporter")
+    info.pop("LSUIElement", None)
+    with plist.open("wb") as stream:
+        plistlib.dump(info, stream)
+    signed = subprocess.run([
+        "/usr/bin/codesign", "--force", "--deep", "--sign", "-", str(helper),
+    ], check=False, capture_output=True, text=True, timeout=60)
+    if signed.returncode != 0:
+        raise BuildError(f"Startup reporter signing failed: {signed.stderr.strip()}")
+    return helper
+
+
 def _package_version(name: str) -> str | None:
     """Return an installed distribution version, or None."""
 
@@ -398,6 +434,11 @@ def build_app_main(
     )
 
     if sys.platform == "darwin":
+        try:
+            build_app_dialog_helper(output_path)
+        except (BuildError, OSError, subprocess.SubprocessError) as error:
+            print(f"Startup reporter build failed; refusing this build: {error}", file=sys.stderr)
+            return 1
         signing = subprocess.run(
             ["codesign", "--force", "--deep", "--sign", "-", str(output_path)], check=False
         )

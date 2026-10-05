@@ -80,3 +80,26 @@ project history.
   package versions, log location, and source-versus-package recovery advice.
 - Documented log collection in README and extended the integrated harness and
   native frozen smoke tests to verify diagnostic output.
+
+## 2026-10-05 — Version 0.4.2 native Quit and automatic repair
+
+- Deferred the macOS native Quit callback before a modal busy confirmation,
+  following the CPython issue 158053 workaround; preserved button picker behavior.
+- Added native automatic-repair selection backed by an exact-version local
+  complete-app backup, staging verification, detached swap, rollback, and logs.
+- Kept source installer recovery separate from packaged-app offline recovery.
+- Extended modular regression/native package validation with corruption and
+  damaged-package recovery checks; used generated fixtures rather than user media.
+- Repaired the original OneDrive checkout's unreadable Git metadata by preserving
+  it as `.git-cloud-backup-20261005` and pointing `.git` at verified metadata in
+  durable local storage. Preserved tracked files and unrelated license/VS Code edits.
+- Kept the local licensing overlays outside the GitHub source update.
+
+### Version 0.4.2 native recovery validation follow-up
+
+- Made repair-lock handover atomic and protected newly created partial locks
+  from a concurrent repair attempt.
+- Corrected macOS reporter request delivery after an actual popup test exposed
+  that LaunchServices does not pass command-line arguments to AppleScript run handlers.
+- Added exact Windows Fix automatically/Close labels and native dialog transport
+  checks alongside the complete-package recovery harness.

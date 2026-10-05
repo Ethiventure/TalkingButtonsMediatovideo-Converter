@@ -143,8 +143,12 @@ class FakeRoot(FakeWidget):
         super().__init__(viewable=viewable)
         self.bindings: list[tuple[str, object]] = []
         self.after_idle_calls: list[object] = []
+        self.commands: dict[str, object] = {}
         self.cancelled = False
         self.tk = FakeTkCall()
+
+    def createcommand(self, name: str, function: object) -> None:
+        self.commands[name] = function
 
     def bind(self, sequence: str, callback: object, add: str | None = None) -> None:
         self.bindings.append((sequence, callback))
@@ -363,6 +367,67 @@ class WorkerErrorLoggingTests(UiTestCase):
         self.assertEqual(
             exceptions, [("exception", ("MKV to MP4 conversion failed", error), {})]
         )
+
+
+class MacMenuQuitTests(UiTestCase):
+    """The App menu Quit must return at once and defer the close path."""
+
+    def test_quit_hook_is_only_installed_on_macos(self) -> None:
+        mac_root = FakeRoot()
+        handler = mock.MagicMock()
+
+        installed = WEB_UI._install_macos_quit_hook(
+            mac_root, handler, platform_name="darwin"
+        )
+
+        self.assertTrue(installed)
+        self.assertIs(mac_root.commands["tk::mac::Quit"], handler)
+        windows_root = FakeRoot()
+        self.assertFalse(
+            WEB_UI._install_macos_quit_hook(
+                windows_root, handler, platform_name="win32"
+            )
+        )
+        self.assertEqual(windows_root.commands, {})
+
+    def test_menu_quit_returns_immediately_and_queues_the_close(self) -> None:
+        app = make_app()
+        WEB_UI._install_macos_quit_hook(
+            app._root, app._on_native_quit, platform_name="darwin"
+        )
+        closed: list[str] = []
+        app._on_close = lambda: closed.append("closed")
+
+        # This is exactly what Tk's native menu dispatches.
+        app._root.commands["tk::mac::Quit"]()
+
+        self.assertEqual(closed, [])
+        self.assertEqual(len(app._root.after_idle_calls), 1)
+        app._root.after_idle_calls[0]()
+        self.assertEqual(closed, ["closed"])
+
+    def test_busy_close_confirmation_runs_only_from_the_queued_callback(self) -> None:
+        app = make_app()
+        app._busy_operation = "converting"
+        self.messagebox.askyesno.return_value = True
+
+        app._on_native_quit()
+
+        self.assertFalse(app._cancel_event.is_set())
+        self.assertFalse(app._root.cancelled)
+        app._root.after_idle_calls[0]()
+        self.assertTrue(self.messagebox.askyesno.called)
+        self.assertTrue(app._cancel_event.is_set())
+        self.assertTrue(app._root.cancelled)
+
+    def test_regular_button_actions_still_run_inline(self) -> None:
+        app = make_app()
+        app._busy_operation = "converting"
+
+        app._cancel()
+
+        self.assertTrue(app._cancel_event.is_set())
+        self.assertEqual(app._root.after_idle_calls, [])
 
 
 class MkvLifecycleLoggingTests(UiTestCase):

@@ -14,7 +14,7 @@ import threading
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
-from typing import Any
+from typing import Any, Callable
 
 from . import __version__
 from . import diagnostics
@@ -93,6 +93,27 @@ def _diagnostics_recovery_text() -> str:
         return diagnostics.diagnostics_recovery_text()
     except Exception:  # noqa: BLE001 - logging must never break the interface
         return ""
+
+
+def _install_macos_quit_hook(
+    root: object, handler: Callable[[], None], platform_name: str | None = None
+) -> bool:
+    """Route the macOS App menu Quit through the normal close path.
+
+    Tk dispatches the App menu Quit command inside its native menu stack, where
+    opening a confirmation dialog can hang the application on macOS 27, so the
+    command only queues the existing close handler with ``after_idle`` and
+    returns immediately (workaround from CPython issue 158053). Other platforms
+    are untouched, and no menu of our own is added.
+    """
+
+    if (platform_name or sys.platform) != "darwin":
+        return False
+    try:
+        root.createcommand("tk::mac::Quit", handler)
+    except tk.TclError:
+        return False
+    return True
 
 
 class MkvToMp4Dialog:
@@ -506,6 +527,11 @@ class MediaToVideoApp:
         self._root.protocol("WM_DELETE_WINDOW", self._on_close)
         # Tk callback failures have no console in a windowed build.
         self._root.report_callback_exception = self._report_callback_exception
+        # The application defines no menus of its own. Only the macOS App menu
+        # Quit needs routing: it is deferred so its confirmation cannot run in
+        # the native menu stack. About, Preferences, and Help stay at Tk's own
+        # defaults, which the real-menu check confirms open no modal dialog.
+        _install_macos_quit_hook(self._root, self._on_native_quit)
         # The window is only "running" once it has actually mapped and drawn.
         self._root.bind("<Map>", self._announce_ready, add="+")
         self._root.bind("<Configure>", self._announce_ready, add="+")
@@ -1244,6 +1270,16 @@ class MediaToVideoApp:
             f"Application window closing (running operation: {self._busy_operation or 'none'})."
         )
         self._root.destroy()
+
+    def _on_native_quit(self) -> None:
+        """Queue the close path instead of running it in Tk's menu stack.
+
+        The macOS App menu Quit command is dispatched from native menu code,
+        where ``messagebox`` can hang the interface. Queuing ``_on_close`` keeps
+        that command returning immediately while the confirmation still runs.
+        """
+
+        self._root.after_idle(self._on_close)
 
 
 def web_ui_main() -> None:

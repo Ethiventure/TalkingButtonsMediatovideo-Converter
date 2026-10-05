@@ -189,6 +189,10 @@ jobs:
           print("frozen self-test report verified:", report_path)
           PY
 
+      - name: Restore a disposable damaged native package
+        timeout-minutes: 10
+        run: '"$PYTHON" scripts/test_harness.py --package "$BUNDLE"'
+
       - name: Retain frozen smoke-test diagnostics
         if: always()
         uses: actions/upload-artifact@v4
