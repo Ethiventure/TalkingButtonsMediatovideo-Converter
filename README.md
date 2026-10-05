@@ -193,9 +193,12 @@ silently stop other planned groups.
 
 ## Automatic first-run setup
 
-The application requires Python 3.9 or newer with Tkinter, FFmpeg, and FFprobe.
-The native launchers check these components on every start and install only what
-is missing. An internet connection may be required on the first run.
+The self-contained application carries its own dependencies and needs no
+first-run package installation. For source checkouts, the launchers enforce
+Python 3.14.8 or newer, Tk 9.1.0 or newer on macOS (9.0.4 on Windows), and
+FFmpeg/FFprobe 8.1.2 or newer. They check these components on every start and
+install or upgrade unsupported prerequisites. An internet connection may be
+required for that setup.
 
 ### Windows
 
@@ -269,8 +272,10 @@ python scripts/build_app.py
 ```
 
 PyInstaller writes the app to `dist/`. Build the Windows `.exe` on Windows and
-the macOS app on macOS; PyInstaller does not cross-compile between them. FFmpeg
-must still be installed separately or selected in the app.
+the macOS app on macOS; PyInstaller does not cross-compile between them. Both
+FFmpeg and FFprobe must be available on the build machine; the builder packages
+them and their required libraries into the application. See the self-contained
+build instructions below for explicit tool selection and validation.
 
 ## Convert an existing MKV to MP4
 
