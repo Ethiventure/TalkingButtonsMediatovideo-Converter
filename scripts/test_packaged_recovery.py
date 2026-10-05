@@ -110,6 +110,10 @@ def test_packaged_recovery_main() -> int:
             evidence["error"] = f"{type(error).__name__}: {error}"
             print(evidence["error"], file=sys.stderr)
         finally:
+            # Retain detached-helper startup errors as well as application logs:
+            # parameter binding can fail before the helper writes its result.
+            for index, log in enumerate(home.rglob("*helper-startup.log")):
+                shutil.copy2(log, reports / f"helper-startup-{index}.log")
             for index, log in enumerate(home.rglob("application-debug.log")):
                 shutil.copy2(log, reports / f"repair-debug-{index}.log")
             for index, log in enumerate(scratch.rglob("application-debug.log")):

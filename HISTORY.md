@@ -123,3 +123,9 @@ project history.
 ### Version 0.4.2 final Windows fixture isolation
 
 - Gave the shared-staging helper test its own directory name after native Windows CI found a collision with the base application fixture; application code is unchanged.
+
+### Version 0.4.2 detached Windows helper diagnostics
+
+- Full packaged recovery validation found no detached-helper result despite passing direct helper tests.
+- Added startup-output retention and an exact production-launch test, covering an empty PATH, apostrophes in paths, and empty optional arguments.
+- Retained this diagnostic evidence before choosing the corrective change; did not increase the recovery deadlines.

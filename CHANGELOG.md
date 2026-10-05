@@ -21,6 +21,8 @@ All notable changes to Mediatovideo Converter are recorded here.
 - Audit original ZIP member names before Windows normalizes separators.
 - Remove a repair staging container only when it is empty, preserving
   neighboring files and the retained application backup.
+- Retain Windows repair-helper startup output and detect an immediate helper
+  exit, so launch failures include an exit code and diagnostic file location.
 
 ### Limitations
 

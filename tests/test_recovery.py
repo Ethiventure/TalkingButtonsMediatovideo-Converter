@@ -1092,6 +1092,49 @@ class SwapHelperTests(RecoveryTestCase):
         self.assertTrue(recovery._recovery_pid_alive(os.getpid()))
         self.assertFalse(recovery._recovery_pid_alive(2147483646))
 
+    @unittest.skipUnless(sys.platform == "win32", "native detached Windows launcher")
+    def test_windows_production_launcher_with_minimal_environment(self) -> None:
+        """Exercise the actual raw argv and detached launch with hostile paths."""
+        folder = self.root / "repair's test folder"
+        folder.mkdir()
+        target = folder / "target"
+        target.mkdir()
+        (target / "old.txt").write_text("old", encoding="utf-8")
+        container = folder / "staging"
+        container.mkdir()
+        candidate = container / "candidate"
+        candidate.mkdir()
+        (candidate / "new.txt").write_text("new", encoding="utf-8")
+        backup = folder / "target.previous"
+        result = self.cache / "detached-result.json"
+        lock = self.cache / "repair.lock"
+        lock.write_text("pid=999999\noperation=foreign\n", encoding="utf-8")
+        helper = recovery._recovery_write_helper(self.cache, relaunch=False)
+        environment = {
+            "PATH": "", "HOME": str(self.root), "USERPROFILE": str(self.root),
+            "LOCALAPPDATA": str(self.cache), "TEMP": str(self.root),
+            "TMP": str(self.root), "TMPDIR": str(self.root),
+            "SystemRoot": os.environ["SystemRoot"],
+        }
+        arguments = ["2147483646", str(candidate), str(target), str(backup), "",
+                     str(result), str(lock), "3", "0", str(target / "app.exe")]
+        startup = result.with_suffix(".helper-startup.log")
+        try:
+            with mock.patch.dict(os.environ, environment, clear=True):
+                recovery._recovery_launch_helper(helper, arguments)
+        except OSError as error:
+            self.fail(f"{error}\n{startup.read_text(errors='replace')}")
+        deadline = time.monotonic() + 20
+        while not result.is_file() and time.monotonic() < deadline:
+            time.sleep(0.1)
+        self.assertTrue(result.is_file(), startup.read_text(errors="replace"))
+        payload = json.loads(result.read_text(encoding="utf-8"))
+        self.assertTrue(payload["ok"], payload)
+        self.assertEqual(payload["target_path"], str(target))
+        self.assertTrue((target / "new.txt").is_file())
+        self.assertTrue((backup / "old.txt").is_file())
+        self.assertTrue(lock.is_file())
+
     @unittest.skipUnless(sys.platform == "win32", "native Windows helper test")
     def test_windows_helper_swaps_a_fake_directory(self) -> None:
         helper_dir = self.root / "helper"

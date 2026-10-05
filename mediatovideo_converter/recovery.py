@@ -715,19 +715,30 @@ def _recovery_launch_helper(helper: Path, arguments: Sequence[str]) -> int:
         )
         return process.pid
     powershell = _recovery_windows_powershell()
-    process = subprocess.Popen(
-        [
-            str(powershell),
-            "-NoProfile",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-File",
-            str(helper),
-            *arguments,
-        ],
-        creationflags=0x00000008 | 0x00000200,  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
-        **options,
-    )
+    # PowerShell can fail during parameter binding before the script's logging
+    # starts. Keep that output beside the operation result for troubleshooting.
+    startup_log = Path(arguments[5]).with_suffix(".helper-startup.log")
+    with startup_log.open("ab") as output:
+        options.update(stdout=output, stderr=output)
+        process = subprocess.Popen(
+            [
+                str(powershell),
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(helper),
+                *arguments,
+            ],
+            creationflags=0x00000008 | 0x00000200,  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+            **options,
+        )
+    try:
+        status = process.wait(timeout=0.25)
+    except subprocess.TimeoutExpired:
+        status = None
+    if status not in (None, 0):
+        raise OSError(f"Repair helper exited with status {status}; startup log: {startup_log}")
     return process.pid
 
 
