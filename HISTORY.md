@@ -119,3 +119,7 @@ project history.
 
 - Native Windows CI passed the repair dialog button gate and exposed recursive staging-parent cleanup.
 - Replaced that cleanup with an atomic empty-directory removal, preserving neighboring files even when the staging layout changes; retained native helper and sibling-preservation checks.
+
+### Version 0.4.2 final Windows fixture isolation
+
+- Gave the shared-staging helper test its own directory name after native Windows CI found a collision with the base application fixture; application code is unchanged.

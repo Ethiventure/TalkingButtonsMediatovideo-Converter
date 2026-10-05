@@ -1031,7 +1031,7 @@ class SwapHelperTests(RecoveryTestCase):
         (target / "old.txt").write_text("old", encoding="utf-8")
         # A candidate staged directly in a shared folder: the parent also holds
         # the fixture's own result, backup and keep file, so it must survive.
-        candidate = self.root / "Mediatovideo Converter"
+        candidate = self.root / "shared-staging-candidate"
         candidate.mkdir()
         (candidate / "new.txt").write_text("new", encoding="utf-8")
         keep = self.root / "keep.txt"
