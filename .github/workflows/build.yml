@@ -58,6 +58,11 @@ jobs:
           if brew list --versions openssl@1.1 >/dev/null 2>&1; then
             brew unlink openssl@1.1
           fi
+          # Some hosted images retain a stale symlink without a registered keg.
+          OPENSSL_ALIAS="$(brew --prefix)/bin/openssl"
+          if [ -L "$OPENSSL_ALIAS" ] && [[ "$(readlink "$OPENSSL_ALIAS")" == *openssl@1.1* ]]; then
+            rm "$OPENSSL_ALIAS"
+          fi
           brew install python@3.14 python-tk@3.14 ffmpeg
           PYTHON="$(brew --prefix python@3.14)/bin/python3.14"
           FFMPEG_BIN="$(brew --prefix ffmpeg)/bin"
@@ -122,23 +127,18 @@ jobs:
           set -uo pipefail
           REPORT="$RUNNER_TEMP/selftest.json"
           rm -f "$REPORT"
-          # No PATH at all: the self-test must resolve its tools from the
-          # bundle, and its report records the PATH it saw.
-          if [ "${{ matrix.platform }}" = "macos" ]; then
-            env -i "$BUNDLE_EXECUTABLE" --self-test --self-test-report "$REPORT"
-          else
-            env -i SYSTEMROOT="${SYSTEMROOT:-}" TEMP="${TEMP:-/tmp}" TMP="${TMP:-/tmp}" \
-              "$BUNDLE_EXECUTABLE" --self-test --self-test-report "$REPORT"
-          fi
-          STATUS=$?
-          if [ ! -f "$REPORT" ]; then
-            echo "The frozen application wrote no self-test report (exit $STATUS)."
-            exit 1
-          fi
-          "$PYTHON" - "$REPORT" "$BUNDLE" "$STATUS" <<'PY'
-          import json, pathlib, sys
+          # Launch with Python's native process API. MSYS env -i inserts its
+          # own Git PATH on Windows, which would invalidate this isolation test.
+          "$PYTHON" - "$REPORT" "$BUNDLE" "$BUNDLE_EXECUTABLE" <<'PY'
+          import json, os, pathlib, subprocess, sys
 
-          report_path, bundle, status = sys.argv[1], pathlib.Path(sys.argv[2]), int(sys.argv[3])
+          report_path, bundle, executable = sys.argv[1], pathlib.Path(sys.argv[2]), pathlib.Path(sys.argv[3]).resolve()
+          child_env = {"PATH": ""}
+          if os.name == "nt":
+              for name in ("SystemRoot", "TEMP", "TMP"):
+                  if os.environ.get(name):
+                      child_env[name] = os.environ[name]
+          status = subprocess.run([str(executable), "--self-test", "--self-test-report", report_path], env=child_env, timeout=90).returncode
           report = json.loads(pathlib.Path(report_path).read_text(encoding="utf-8"))
           assert status == 0, f"frozen self-test exited {status}: {report}"
           assert report.get("ok") is True, f"self-test did not pass: {report}"
