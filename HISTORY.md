@@ -137,3 +137,7 @@ project history.
 ### Version 0.4.2 Windows console and module isolation
 
 - Native launch probes showed DETACHED_PROCESS silently skipped even a marker script under both environments. Added focused hidden-console/no-window and one-variable OS environment probes before selecting the production correction.
+
+### Version 0.4.2 Windows private system PATH probe
+
+- Hidden-process probes execute the marker correctly. Added a focused OS-only PATH versus empty-PATH probe to isolate the remaining helper environment difference before changing its policy.

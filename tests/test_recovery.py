@@ -1101,13 +1101,12 @@ class SwapHelperTests(RecoveryTestCase):
                    "TMP": str(self.root), "SystemRoot": os.environ["SystemRoot"]}
         names = ("ParentPid", "Candidate", "Target", "Backup", "LogPath",
                  "ResultPath", "LockPath", "WaitSeconds", "Relaunch", "RelaunchCommand")
-        cases = [(env, flags, shape, None) for env in ("full", "minimal")
-                 for flags in ("no_window", "hidden_console") for shape in ("raw", "marker")]
-        cases += [("minimal", "regular", "raw", name)
-                  for name in ("windir", "ComSpec", "PSModulePath", "all")]
+        cases = [("minimal_os_path", "no_window", "raw", None),
+                 ("full_empty_path", "no_window", "raw", None)]
         system = Path(os.environ["SystemRoot"])
-        anchors = {"windir": str(system), "ComSpec": str(system / "System32" / "cmd.exe"),
-                   "PSModulePath": str(system / "System32" / "WindowsPowerShell" / "v1.0" / "Modules")}
+        os_path = os.pathsep.join(str(p) for p in
+                  (system / "System32", system, system / "System32" / "WindowsPowerShell" / "v1.0"))
+        anchors = {}
         outcomes = []
         for index, (env_name, flags_name, shape, restored) in enumerate(cases):
             folder = self.root / f"matrix {index}'s fixture"
@@ -1123,7 +1122,8 @@ class SwapHelperTests(RecoveryTestCase):
                 arguments = [str(result)]
             elif shape == "named":
                 arguments = [value for pair in zip(("-" + name for name in names), arguments) for value in pair]
-            environment = dict(full if env_name == "full" else minimal)
+            environment = dict(full if env_name.startswith("full") else minimal)
+            environment["PATH"] = "" if env_name == "full_empty_path" else os_path
             if restored:
                 environment.update(anchors if restored == "all" else {restored: anchors[restored]})
             environment.update(RECOVERY_RESULT_TARGET_JSON=json.dumps(str(target)),
