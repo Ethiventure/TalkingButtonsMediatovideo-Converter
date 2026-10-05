@@ -379,7 +379,7 @@ class MkvLifecycleLoggingTests(UiTestCase):
             (
                 "info",
                 ("MKV to MP4 conversion started",),
-                {"source": "/tmp/in/clip.mkv", "target": "/tmp/out/clip.mp4"},
+                {"source": str(Path("/tmp/in/clip.mkv")), "target": str(Path("/tmp/out/clip.mp4"))},
             ),
             STUB.calls,
         )
@@ -392,7 +392,7 @@ class MkvLifecycleLoggingTests(UiTestCase):
             (
                 "info",
                 ("MKV to MP4 conversion completed",),
-                {"output": "/tmp/out/clip.mp4"},
+                {"output": str(Path("/tmp/out/clip.mp4"))},
             ),
             STUB.calls,
         )

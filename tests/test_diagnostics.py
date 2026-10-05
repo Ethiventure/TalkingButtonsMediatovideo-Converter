@@ -225,7 +225,9 @@ class DiagnosticsRotationTests(DiagnosticsTestCase):
     def test_write_failure_is_nonfatal(self) -> None:
         path = diagnostics.diagnostics_start()
         self.assertTrue(path.exists())
-        # Removing the file under the handler must not raise into the caller.
+        # Windows locks open log files. Close the stream first, then force the
+        # handler's next write to reopen a path whose directory is unavailable.
+        diagnostics._state.file_handler.close()
         path.unlink()
         path.parent.rmdir()
         diagnostics.diagnostics_info("after removal")
