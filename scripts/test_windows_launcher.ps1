@@ -5,7 +5,11 @@ $boundary = $source.LastIndexOf("`nWrite-InstallerHeader`n")
 if ($boundary -lt 0) { throw 'Launcher entry point not found.' }
 # Load the real functions while retaining the real top-level orchestration for
 # the test. Parsing/evaluating the definitions also catches PowerShell errors.
-. ([scriptblock]::Create($source.Substring(0, $boundary)))
+# Dynamic scriptblocks have no file-backed PSScriptRoot. Bind the original
+# launcher's directory explicitly while loading its unchanged function logic.
+$repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path.Replace("'", "''")
+$definitions = $source.Substring(0, $boundary).Replace('$PSScriptRoot', "'$repoRoot'")
+. ([scriptblock]::Create($definitions))
 $startup = [scriptblock]::Create($source.Substring($boundary))
 function Write-InstallerHeader {}
 function Write-InstallerStep {}
