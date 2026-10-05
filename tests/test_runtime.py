@@ -627,16 +627,22 @@ class RuntimeRepairTests(unittest.TestCase):
     def test_target_text_falls_back_when_the_getter_is_missing(self) -> None:
         module = fake_recovery_module(target=None)
         with mock.patch.object(runtime, "runtime_frozen_app_path", return_value=Path("/tmp/fallback.app")):
-            self.assertEqual(runtime.runtime_repair_target_text(module), "/tmp/fallback.app")
+            self.assertEqual(
+                runtime.runtime_repair_target_text(module), str(Path("/tmp/fallback.app"))
+            )
 
     def test_frozen_app_path_targets_the_running_bundle(self) -> None:
         mac_executable = "/private/tmp/mediatovideo-damaged/Mediatovideo Converter.app/Contents/MacOS/app"
+        expected_mac = Path(mac_executable).resolve()
+        for parent in expected_mac.parents:
+            if parent.suffix == ".app":
+                expected_mac = parent
+                break
         with mock.patch.object(runtime, "runtime_is_frozen", return_value=True), mock.patch.object(
             runtime.sys, "executable", mac_executable
         ), mock.patch.object(runtime.sys, "platform", "darwin"):
             self.assertEqual(
-                str(runtime.runtime_frozen_app_path()),
-                "/private/tmp/mediatovideo-damaged/Mediatovideo Converter.app",
+                runtime.runtime_frozen_app_path(), expected_mac
             )
         with mock.patch.object(runtime, "runtime_is_frozen", return_value=True), mock.patch.object(
             runtime.sys, "executable", "/tmp/win/Mediatovideo Converter.exe"
@@ -1115,6 +1121,7 @@ class RuntimeRepairTests(unittest.TestCase):
                 self.assertIs(runtime.runtime_show_repair_dialog("body"), expected)
             message_box.assert_called_once_with("body")
 
+    @unittest.skipIf(sys.platform.startswith("win"), "off-Windows unavailability path")
     def test_windows_task_dialog_is_gracefully_unavailable_off_windows(self) -> None:
         # The real function must return None (never raise) when comctl32 or the
         # ctypes ABI is unavailable, so the caller can fall back.
@@ -1140,23 +1147,33 @@ class RuntimeRepairTests(unittest.TestCase):
             worker.join(timeout=60)
             self.assertFalse(
                 worker.is_alive(),
-                "TaskDialog did not dismiss within the watchdog; the autoclick callback did not fire",
+                "TaskDialog did not dismiss within the watchdog; the autoclick callback did not fire: {}".format(
+                    runtime.runtime_windows_task_dialog_diagnostic()
+                ),
             )
-        self.assertIs(results.get("fix"), True)
-        self.assertIs(results.get("close"), False)
+        self.assertIs(
+            results.get("fix"), True, runtime.runtime_windows_task_dialog_diagnostic()
+        )
+        self.assertIs(
+            results.get("close"), False, runtime.runtime_windows_task_dialog_diagnostic()
+        )
 
     def test_windows_task_dialog_layout_matches_commctrl(self) -> None:
         structures = runtime.runtime_windows_task_dialog_structures()
         self.assertIsNotNone(structures)
         button, config = structures
+        self.assertEqual(getattr(button, "_pack_"), 1)
+        self.assertEqual(getattr(config, "_pack_"), 1)
         pointer = ctypes.sizeof(ctypes.c_void_p)
-        self.assertEqual(ctypes.sizeof(button), 16 if pointer == 8 else 8)
+        self.assertEqual(ctypes.sizeof(button), 12 if pointer == 8 else 8)
         if pointer == 8:
-            self.assertEqual(ctypes.sizeof(config), 176)
+            # Microsoft .NET generated TASKDIALOGCONFIG/TASKDIALOG_BUTTON use
+            # Pack=1: measured 160 bytes with these packed offsets.
+            self.assertEqual(ctypes.sizeof(config), 160)
             expected = {
-                "cbSize": 0, "hwndParent": 8, "hInstance": 16, "pszWindowTitle": 32,
-                "pszMainInstruction": 48, "pszContent": 56, "cButtons": 64, "pButtons": 72,
-                "nDefaultButton": 80, "pfCallback": 152, "lpCallbackData": 160, "cxWidth": 168,
+                "cbSize": 0, "hwndParent": 4, "hInstance": 12, "pszWindowTitle": 28,
+                "pszMainInstruction": 44, "pszContent": 52, "cButtons": 60, "pButtons": 64,
+                "nDefaultButton": 72, "pfCallback": 140, "lpCallbackData": 148, "cxWidth": 156,
             }
         else:
             self.assertEqual(ctypes.sizeof(config), 96)
@@ -1168,11 +1185,23 @@ class RuntimeRepairTests(unittest.TestCase):
         for name, offset in expected.items():
             self.assertEqual(getattr(config, name).offset, offset, name)
 
+    @unittest.skipIf(sys.platform.startswith("win"), "off-Windows unavailability path")
     def test_windows_post_dialog_click_is_gracefully_unavailable_off_windows(self) -> None:
         with mock.patch.object(runtime.sys, "platform", "win32"):
             self.assertFalse(
                 runtime.runtime_windows_post_dialog_click(0, runtime.RUNTIME_WINDOWS_FIX_BUTTON_ID)
             )
+
+    def test_windows_task_dialog_records_a_failure_stage_without_dialog_text(self) -> None:
+        # Mock the structure build so no native dialog can ever open here (this
+        # test must also be safe on Windows CI).
+        with mock.patch.object(runtime.sys, "platform", "win32"), mock.patch.object(
+            runtime, "runtime_windows_task_dialog_structures", return_value=None
+        ):
+            self.assertIsNone(runtime.runtime_windows_task_dialog("secret dialog body"))
+        diagnostic = runtime.runtime_windows_task_dialog_diagnostic()
+        self.assertEqual(diagnostic.get("stage"), "task-dialog-structures")
+        self.assertNotIn("secret dialog body", str(diagnostic))
 
     @unittest.skipUnless(
         sys.platform.startswith("darwin") and shutil.which("osacompile") and shutil.which("open"),

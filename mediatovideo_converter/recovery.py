@@ -500,41 +500,52 @@ def _recovery_audit_archive(archive: Path) -> tuple[bool, str, int]:
         # a target outside the archive's top-level package is not.
         for member in members:
             name = member.filename
-            if name in seen:
-                return False, f"the recovery archive repeats the entry {name}", 0
+            # ZipInfo keeps the raw central-directory name in orig_filename and
+            # normalises Windows separators in filename, so the raw name is what
+            # the archive actually contains and must be audited first. A NUL is
+            # checked too, because the ZIP parser truncates a name at it.
+            raw_name = getattr(member, "orig_filename", "") or name
+            for candidate in (raw_name, name):
+                if "\x00" in candidate:
+                    return False, "the recovery archive has a NUL byte in an entry name", 0
+            if name in seen or raw_name in seen:
+                return False, f"the recovery archive repeats the entry {raw_name}", 0
             seen.add(name)
-            if "\\" in name:
-                return False, f"the recovery archive uses a backslash path: {name}", 0
-            if name.startswith("/") or _WINDOWS_DRIVE_PATTERN.match(name):
-                return False, f"the recovery archive has an absolute path: {name}", 0
-            parts = PurePosixPath(name).parts
+            seen.add(raw_name)
+            for candidate in (raw_name, name):
+                if "\\" in candidate:
+                    return False, f"the recovery archive uses a backslash path: {candidate}", 0
+                if candidate.startswith("/") or _WINDOWS_DRIVE_PATTERN.match(candidate):
+                    return False, f"the recovery archive has an absolute path: {candidate}", 0
+            parts = PurePosixPath(raw_name).parts
             if ".." in parts:
-                return False, f"the recovery archive escapes its directory: {name}", 0
+                return False, f"the recovery archive escapes its directory: {raw_name}", 0
             mode = (member.external_attr >> 16) & 0xFFFF
             if stat.S_ISLNK(mode):
                 if sys.platform == "win32":
                     return False, "symlinks are not allowed in a Windows recovery archive", 0
                 target = handle.read(member).decode("utf-8", "replace")
-                resolved = _recovery_resolve_link(PurePosixPath(name).parent, target)
+                resolved = _recovery_resolve_link(PurePosixPath(raw_name).parent, target)
                 if resolved is None or not resolved.parts or resolved.parts[0] != parts[0]:
-                    return False, f"the recovery archive links outside its package: {name}", 0
-                symlinks.add(name)
+                    return False, f"the recovery archive links outside its package: {raw_name}", 0
+                symlinks.add(raw_name)
             elif stat.S_ISFIFO(mode) or stat.S_ISSOCK(mode) or stat.S_ISBLK(mode) or stat.S_ISCHR(mode):
-                return False, f"the recovery archive contains a special file: {name}", 0
+                return False, f"the recovery archive contains a special file: {raw_name}", 0
             total += member.file_size
             if total > RECOVERY_MAX_UNCOMPRESSED_BYTES:
                 return False, "the recovery archive expands beyond the supported limit", 0
             if member.file_size and member.compress_size == 0:
-                return False, f"the recovery archive has an invalid entry: {name}", 0
+                return False, f"the recovery archive has an invalid entry: {raw_name}", 0
         # Second pass: a member must never live under a symlinked directory,
         # whatever order the entries appear in.
         for member in members:
-            parts = PurePosixPath(member.filename).parts
+            raw_name = getattr(member, "orig_filename", "") or member.filename
+            parts = PurePosixPath(raw_name).parts
             for index in range(1, len(parts)):
                 if "/".join(parts[:index]) in symlinks:
                     return False, (
                         "the recovery archive places files under a symlinked "
-                        f"directory: {member.filename}"
+                        f"directory: {raw_name}"
                     ), 0
     return True, "the recovery archive passed its safety checks", total
 

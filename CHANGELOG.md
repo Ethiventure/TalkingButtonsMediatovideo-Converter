@@ -16,6 +16,9 @@ All notable changes to Mediatovideo Converter are recorded here.
 
 - Defer the macOS native Quit callback before entering a modal busy confirmation,
   using the workaround for CPython issue 158053; Cmd-Q now confirms active folder work.
+- Match the Windows repair dialog's native structure layout and retain
+  diagnostics when the custom dialog API is unavailable.
+- Audit original ZIP member names before Windows normalizes separators.
 
 ### Limitations
 

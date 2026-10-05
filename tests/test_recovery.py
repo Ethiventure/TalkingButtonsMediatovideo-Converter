@@ -233,7 +233,18 @@ class ArchiveAuditTests(RecoveryTestCase):
         }
         for label, name in cases.items():
             with self.subTest(label=label):
-                ok, _detail = self.audit(f"{label}.zip", lambda h, n=name: h.writestr(n, "x"))
+                def writer(handle: zipfile.ZipFile, raw: str = name) -> None:
+                    if "\\" in raw:
+                        # Force the raw central-directory name: ZipInfo would
+                        # otherwise normalise a backslash on Windows.
+                        info = zipfile.ZipInfo("placeholder")
+                        info.filename = raw
+                        info.orig_filename = raw
+                        handle.writestr(info, "x")
+                    else:
+                        handle.writestr(raw, "x")
+
+                ok, _detail = self.audit(f"{label}.zip", writer)
                 self.assertFalse(ok)
 
     def test_duplicate_entries_are_rejected(self) -> None:
@@ -245,6 +256,57 @@ class ArchiveAuditTests(RecoveryTestCase):
 
         self.assertFalse(ok)
         self.assertIn("repeats", detail)
+
+    def test_raw_backslash_entry_is_rejected_when_the_reader_normalises_names(self) -> None:
+        def writer(handle: zipfile.ZipFile) -> None:
+            info = zipfile.ZipInfo("placeholder")
+            info.filename = "App.app\\evil"
+            info.orig_filename = "App.app\\evil"
+            handle.writestr(info, "x")
+
+        archive = self.cache / "raw-backslash.zip"
+        with zipfile.ZipFile(archive, "w") as handle:
+            writer(handle)
+        # Emulate the Windows reader, which rewrites os.sep in filename while
+        # orig_filename keeps the raw central-directory name.
+        with mock.patch.object(recovery.zipfile.os, "sep", "\\"):
+            with zipfile.ZipFile(archive) as handle:
+                member = handle.infolist()[0]
+                self.assertNotIn("\\", member.filename)
+                self.assertIn("\\", member.orig_filename)
+            ok, detail, _total = recovery._recovery_audit_archive(archive)
+
+        self.assertFalse(ok)
+        self.assertIn("backslash", detail)
+
+    def test_nul_in_a_raw_entry_name_is_rejected(self) -> None:
+        class FakeMember:
+            filename = "App.app/ok"
+            orig_filename = "App.app/ok\x00evil"
+            external_attr = 0
+            file_size = 0
+            compress_size = 0
+
+        class FakeArchive:
+            def __init__(self, *_args: object, **_kwargs: object) -> None:
+                return None
+
+            def __enter__(self) -> "FakeArchive":
+                return self
+            def __exit__(self, *_args: object) -> None:
+                return None
+            def infolist(self) -> list:
+                return [FakeMember()]
+            def read(self, _member: object) -> bytes:
+                return b""
+
+        placeholder = self.cache / "nul.zip"
+        placeholder.write_bytes(b"PK\\x05\\x06" + b"\\x00" * 18)
+        with mock.patch.object(recovery.zipfile, "ZipFile", FakeArchive):
+            ok, detail, _total = recovery._recovery_audit_archive(placeholder)
+
+        self.assertFalse(ok)
+        self.assertIn("NUL", detail)
 
     @unittest.skipIf(sys.platform == "win32", "symlinks are rejected wholesale on Windows")
     def test_symlink_escape_and_symlinked_ancestor_are_rejected(self) -> None:
@@ -876,6 +938,7 @@ class SwapHelperTests(RecoveryTestCase):
         self.assertFalse(lock.exists())
         self.assertTrue((target / "new.txt").is_file())
 
+    @unittest.skipIf(sys.platform == "win32", "POSIX helper")
     def test_extracted_container_is_cleaned_up_after_a_successful_swap(self) -> None:
         helper_dir = self.root / "helper"
         helper_dir.mkdir(exist_ok=True)
@@ -911,6 +974,8 @@ class SwapHelperTests(RecoveryTestCase):
         (candidate / "new.txt").write_text("new", encoding="utf-8")
         backup = target.with_name("target.previous-win")
         result = self.root / "helper-result.json"
+        lock = self.root / "repair.lock"
+        lock.write_text("pid=999999\noperation=foreign\n", encoding="utf-8")
         helper = recovery._recovery_write_helper(helper_dir, relaunch=False)
         completed = subprocess.run(
             [
@@ -932,13 +997,22 @@ class SwapHelperTests(RecoveryTestCase):
                 "",
                 "-ResultPath",
                 str(result),
+                "-LockPath",
+                str(lock),
                 "-WaitSeconds",
                 "30",
                 "-Relaunch",
                 "0",
+                "-RelaunchCommand",
+                str(target / "Mediatovideo Converter.exe"),
             ],
             check=False,
             timeout=120,
+            env={
+                **os.environ,
+                "RECOVERY_RESULT_TARGET_JSON": json.dumps(str(target)),
+                "RECOVERY_RESULT_BACKUP_JSON": json.dumps(str(backup)),
+            },
         )
         self.assertEqual(completed.returncode, 0)
         self.assertTrue((target / "new.txt").is_file())
@@ -948,6 +1022,8 @@ class SwapHelperTests(RecoveryTestCase):
         self.assertEqual(payload["target_path"], str(target))
         self.assertEqual(payload["backup_path"], str(backup))
         self.assertIn("\\", payload["backup_path"])
+        # A lock owned by another process must survive the helper.
+        self.assertEqual(lock.read_text(encoding="utf-8").splitlines()[0], "pid=999999")
 
 
 if __name__ == "__main__":

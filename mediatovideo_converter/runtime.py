@@ -50,6 +50,10 @@ RUNTIME_WINDOWS_FIX_BUTTON_ID: int = 102
 #: TaskDialog callback posts TDM_CLICK_BUTTON on TDN_CREATED so the dialog
 #: closes itself and the selected id can be asserted without user input.
 RUNTIME_WINDOWS_TASK_DIALOG_AUTOCLICK_ID: Optional[int] = None
+#: Last Windows TaskDialog failure diagnostic (stage, hresult, exception, or
+#: library info). Never contains dialog content; the CI smoke prints it so an
+#: ABI mismatch can be told apart from a missing comctl32 v6 export.
+RUNTIME_WINDOWS_TASK_DIALOG_DIAGNOSTIC: Dict[str, object] = {}
 _HINT = "Start the app with run_macos.command or run_windows.bat so the launcher can "
 # Constant AppleScript: the failure text arrives as argv, so newlines, quotes and
 # backslashes in a block can never break out of the dialog source.
@@ -430,9 +434,10 @@ def runtime_windows_dialog_definition(text: str) -> Dict[str, object]:
 def runtime_windows_task_dialog_structures() -> Optional[Tuple[object, object]]:
     """Return the TASKDIALOG_BUTTON/TASKDIALOGCONFIG ctypes types, or None.
 
-    Field order follows commctrl.h with default alignment: 16-byte button and
-    176-byte config on 64-bit, 96-byte config on 32-bit. Tests assert the
-    measured offsets so a packing mistake cannot ship silently.
+    Field order follows commctrl.h with ``_pack_ = 1`` as in the Microsoft
+    generated layout: 12-byte button and 160-byte config on 64-bit, 8-byte
+    button and 96-byte config on 32-bit. Tests assert the measured packed
+    offsets so a packing mistake cannot ship silently.
     """
     try:
         import ctypes
@@ -441,9 +446,11 @@ def runtime_windows_task_dialog_structures() -> Optional[Tuple[object, object]]:
         return None
 
     class _TaskDialogButton(ctypes.Structure):
+        _pack_ = 1
         _fields_ = [("nButtonID", ctypes.c_int), ("pszButtonText", wintypes.LPCWSTR)]
 
     class _TaskDialogConfig(ctypes.Structure):
+        _pack_ = 1
         _fields_ = [
             ("cbSize", wintypes.UINT),
             ("hwndParent", wintypes.HWND),
@@ -474,6 +481,24 @@ def runtime_windows_task_dialog_structures() -> Optional[Tuple[object, object]]:
     return _TaskDialogButton, _TaskDialogConfig
 
 
+def runtime_windows_task_dialog_diagnostic() -> Dict[str, object]:
+    """Return a copy of the last TaskDialog failure diagnostic.
+
+    The record carries a stage name plus an optional HRESULT or exception and
+    never contains the dialog text, so CI failures can distinguish an ABI or
+    packing problem from a missing comctl32 v6 export.
+    """
+    return dict(RUNTIME_WINDOWS_TASK_DIALOG_DIAGNOSTIC)
+
+
+def runtime_windows_task_dialog_failure(stage: str, **fields: object) -> None:
+    """Record why the Windows TaskDialog could not be used, and log the stage."""
+    RUNTIME_WINDOWS_TASK_DIALOG_DIAGNOSTIC.clear()
+    RUNTIME_WINDOWS_TASK_DIALOG_DIAGNOSTIC["stage"] = stage
+    RUNTIME_WINDOWS_TASK_DIALOG_DIAGNOSTIC.update(fields)
+    runtime_log_info("Windows TaskDialog unavailable", **RUNTIME_WINDOWS_TASK_DIALOG_DIAGNOSTIC)
+
+
 def runtime_windows_post_dialog_click(hwnd: object, button_id: int) -> bool:
     """Post TDM_CLICK_BUTTON to a TaskDialog with explicit 64-bit-safe types.
 
@@ -502,12 +527,14 @@ def runtime_windows_task_dialog(text: str) -> Optional[bool]:
     callback posts TDM_CLICK_BUTTON so CI can exercise the native ABI without
     leaving an interactive dialog behind.
     """
+    RUNTIME_WINDOWS_TASK_DIALOG_DIAGNOSTIC.clear()
     try:
         import ctypes
         from ctypes import wintypes
 
         structures = runtime_windows_task_dialog_structures()
         if structures is None:
+            runtime_windows_task_dialog_failure("task-dialog-structures")
             return None
         _TaskDialogButton, _TaskDialogConfig = structures
         definition = runtime_windows_dialog_definition(text)
@@ -547,7 +574,16 @@ def runtime_windows_task_dialog(text: str) -> Optional[bool]:
             config.pfCallback = ctypes.cast(callback_holder, ctypes.c_void_p).value
 
         library = ctypes.windll.comctl32
-        function = library.TaskDialogIndirect
+        function = getattr(library, "TaskDialogIndirect", None)
+        if function is None:
+            try:
+                import ctypes.util
+
+                resolved = str(ctypes.util.find_library("comctl32") or "comctl32.dll")
+            except Exception:  # noqa: BLE001 - library name is only diagnostic
+                resolved = "comctl32.dll"
+            runtime_windows_task_dialog_failure("task-dialog-export", library=resolved)
+            return None
         function.argtypes = [
             ctypes.POINTER(_TaskDialogConfig),
             ctypes.POINTER(ctypes.c_int),
@@ -559,12 +595,17 @@ def runtime_windows_task_dialog(text: str) -> Optional[bool]:
         hresult = function(ctypes.byref(config), ctypes.byref(selected), None, None)
         del callback_holder
         if hresult != 0:
+            runtime_windows_task_dialog_failure("task-dialog-hresult", hresult=int(hresult))
             return None
         for entry in entries:
             if int(entry["id"]) == selected.value:
                 return bool(entry["result"])
         return False
-    except Exception:  # noqa: BLE001 - unavailable TaskDialog falls back to MessageBox
+    except Exception as error:  # noqa: BLE001 - unavailable TaskDialog falls back to MessageBox
+        runtime_windows_task_dialog_failure(
+            "task-dialog-exception",
+            error="{}: {}".format(type(error).__name__, error),
+        )
         return None
 
 

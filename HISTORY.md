@@ -108,3 +108,9 @@ project history.
 
 - Matched recovery fixtures to each platform's packaged layout and executable suffix, after Ubuntu CI exposed macOS-only assumptions.
 - Exercised the POSIX helper directly on Linux and retained native Windows PowerShell/dialog checks. The production application code is unchanged.
+
+### Version 0.4.2 native Windows validation follow-up
+
+- Corrected the Windows TaskDialog structure packing against Microsoft's native definitions and recorded native API failure stages for debugging.
+- Audited raw ZIP member names before Windows normalizes separators; rejected literal backslashes and NUL bytes.
+- Corrected native Windows test setup for helper lock ownership and isolated native dialog selection from mocked fallback tests.
