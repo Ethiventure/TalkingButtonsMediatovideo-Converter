@@ -133,3 +133,7 @@ project history.
 ### Version 0.4.2 Windows launch isolation
 
 - The exact production-launch test reproduced an absent result and empty startup log. Added bounded native probes comparing argument transport, environment, and console flags, with marker controls and cleanup of every fixture child.
+
+### Version 0.4.2 Windows console and module isolation
+
+- Native launch probes showed DETACHED_PROCESS silently skipped even a marker script under both environments. Added focused hidden-console/no-window and one-variable OS environment probes before selecting the production correction.

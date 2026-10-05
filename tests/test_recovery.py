@@ -1101,11 +1101,15 @@ class SwapHelperTests(RecoveryTestCase):
                    "TMP": str(self.root), "SystemRoot": os.environ["SystemRoot"]}
         names = ("ParentPid", "Candidate", "Target", "Backup", "LogPath",
                  "ResultPath", "LockPath", "WaitSeconds", "Relaunch", "RelaunchCommand")
-        cases = [(env, flags, shape, False) for env in ("full", "minimal")
-                 for flags in ("regular", "detached") for shape in ("raw", "named", "marker")]
-        cases.append(("minimal", "detached", "raw", True))
+        cases = [(env, flags, shape, None) for env in ("full", "minimal")
+                 for flags in ("no_window", "hidden_console") for shape in ("raw", "marker")]
+        cases += [("minimal", "regular", "raw", name)
+                  for name in ("windir", "ComSpec", "PSModulePath", "all")]
+        system = Path(os.environ["SystemRoot"])
+        anchors = {"windir": str(system), "ComSpec": str(system / "System32" / "cmd.exe"),
+                   "PSModulePath": str(system / "System32" / "WindowsPowerShell" / "v1.0" / "Modules")}
         outcomes = []
-        for index, (env_name, flags_name, shape, noninteractive) in enumerate(cases):
+        for index, (env_name, flags_name, shape, restored) in enumerate(cases):
             folder = self.root / f"matrix {index}'s fixture"
             folder.mkdir()
             target, candidate, backup = (folder / name for name in ("target", "candidate", "backup"))
@@ -1120,24 +1124,30 @@ class SwapHelperTests(RecoveryTestCase):
             elif shape == "named":
                 arguments = [value for pair in zip(("-" + name for name in names), arguments) for value in pair]
             environment = dict(full if env_name == "full" else minimal)
+            if restored:
+                environment.update(anchors if restored == "all" else {restored: anchors[restored]})
             environment.update(RECOVERY_RESULT_TARGET_JSON=json.dumps(str(target)),
                                RECOVERY_RESULT_BACKUP_JSON=json.dumps(str(backup)))
             command = [str(recovery._recovery_windows_powershell()), "-NoProfile", "-ExecutionPolicy", "Bypass"]
-            if noninteractive:
-                command.append("-NonInteractive")
             command += ["-File", str(helper), *arguments]
             log = folder / "startup.log"
+            startupinfo = None
+            if flags_name == "hidden_console":
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags = subprocess.STARTF_USESHOWWINDOW
+                startupinfo.wShowWindow = 0
+            flags = {"regular": 0, "no_window": 0x08000200, "hidden_console": 0x10}[flags_name]
             with log.open("wb") as output:
                 child = subprocess.Popen(command, env=environment, stdin=subprocess.DEVNULL,
                                          stdout=output, stderr=output,
-                                         creationflags=0x208 if flags_name == "detached" else 0)
+                                         creationflags=flags, startupinfo=startupinfo)
                 try:
                     status = child.wait(timeout=8)
                 except subprocess.TimeoutExpired:
                     status = "timeout"
                     child.kill(); child.wait(timeout=5)
             outcomes.append(dict(env=env_name, flags=flags_name, shape=shape,
-                                 noninteractive=noninteractive, status=status,
+                                 restored=restored, status=status,
                                  result=result.is_file(), output=log.read_text(errors="replace")))
         print("WINDOWS_LAUNCH_MATRIX " + json.dumps(outcomes), flush=True)
 
