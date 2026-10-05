@@ -163,9 +163,18 @@ jobs:
         if: matrix.platform == 'macos'
         run: ditto -c -k --sequesterRsrc --keepParent "$BUNDLE" "$ARCHIVE"
 
-      - name: Package the bundle with symlinks preserved (Windows)
+      - name: Package and validate the Windows ZIP
         if: matrix.platform == 'windows'
-        run: tar.exe -a -c -f "$ARCHIVE" -C dist "$(basename "$BUNDLE")"
+        run: |
+          "$PYTHON" - <<'PY'
+          import os, pathlib, shutil, zipfile
+          archive = pathlib.Path(os.environ["ARCHIVE"])
+          bundle = pathlib.Path(os.environ["BUNDLE"])
+          shutil.make_archive(str(archive.with_suffix("")), "zip", root_dir=bundle.parent, base_dir=bundle.name)
+          with zipfile.ZipFile(archive) as package:
+              assert package.testzip() is None, "Corrupt Windows ZIP"
+              assert any(name.endswith("Mediatovideo Converter.exe") for name in package.namelist()), "Missing application executable"
+          PY
 
       - name: Upload the native bundle and its manifest
         uses: actions/upload-artifact@v4

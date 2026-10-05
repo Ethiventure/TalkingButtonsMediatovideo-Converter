@@ -65,3 +65,9 @@ project history.
 - Preserved pre-existing local licensing changes outside the GitHub update.
 - Recorded the upstream macOS 27.0 Tk dialog limitation; selected package
   versions are prerequisites rather than a promise against OS regressions.
+
+### Version 0.4.0 packaging verification follow-up
+
+- Replaced the Windows archive command after downloaded artifact inspection
+  found TAR contents behind a ZIP filename. The workflow now creates a real
+  ZIP and validates its integrity and application executable before upload.

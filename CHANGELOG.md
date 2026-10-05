@@ -4,6 +4,8 @@ All notable changes to Mediatovideo Converter are recorded here.
 
 ## [0.4.0] - 2026-10-05
 
+- Validate the Windows distribution as a real ZIP before upload.
+
 ### Changed
 
 - Require Python 3.14.8+, Tk 9.1.0+ on macOS / 9.0.4+ on Windows, and
