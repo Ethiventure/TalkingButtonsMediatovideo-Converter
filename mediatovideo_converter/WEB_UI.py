@@ -17,6 +17,7 @@ from tkinter import filedialog, messagebox, ttk
 from typing import Any
 
 from . import __version__
+from . import diagnostics
 from .converter import (
     FFmpegNotFoundError,
     converter_convert,
@@ -53,6 +54,45 @@ _NAMING_LABELS = {
 }
 _MAX_UI_MESSAGES = 5000
 _MAX_LOG_LINES = 2000
+_READY_MESSAGE = (
+    "Application window initialized; the application should be running now."
+)
+
+
+def _diagnostics_info(message: str, **fields: object) -> None:
+    """Mirror a message to the persistent log without risking the interface."""
+
+    try:
+        diagnostics.diagnostics_info(message, **fields)
+    except Exception:  # noqa: BLE001 - logging must never break the interface
+        pass
+
+
+def _diagnostics_exception(message: str, error: BaseException) -> None:
+    """Write a caught failure and its traceback without risking the interface."""
+
+    try:
+        diagnostics.diagnostics_exception(message, error)
+    except Exception:  # noqa: BLE001 - logging must never break the interface
+        pass
+
+
+def _diagnostics_log_path() -> Path | None:
+    """Return the active log path without letting the logger break the UI."""
+
+    try:
+        return diagnostics.diagnostics_log_path()
+    except Exception:  # noqa: BLE001 - logging must never break the interface
+        return None
+
+
+def _diagnostics_recovery_text() -> str:
+    """Return the recovery guidance without letting the logger break the UI."""
+
+    try:
+        return diagnostics.diagnostics_recovery_text()
+    except Exception:  # noqa: BLE001 - logging must never break the interface
+        return ""
 
 
 class MkvToMp4Dialog:
@@ -243,6 +283,11 @@ class MkvToMp4Dialog:
         self._progress.start(12)
         self._progress_detail.set("Checking MKV and locating FFmpeg…")
         self._status.set("Conversion started. Progress will update below.")
+        _diagnostics_info(
+            "MKV to MP4 conversion started",
+            source=str(source),
+            target=str(target),
+        )
 
         def worker() -> None:
             try:
@@ -254,6 +299,9 @@ class MkvToMp4Dialog:
                     cancel_event=self._cancel_event,
                 )
             except Exception as error:
+                # The traceback is written here, at the catch, so delivering the
+                # error to the interface does not log it a second time.
+                _diagnostics_exception("MKV to MP4 conversion failed", error)
                 self._messages.put(("error", error))
             else:
                 self._messages.put(("done", result))
@@ -310,10 +358,14 @@ class MkvToMp4Dialog:
         self._progress.stop()
         self._set_busy(False)
         if result.cancelled:
+            _diagnostics_info("MKV to MP4 conversion cancelled")
             self._progress.configure(mode="determinate", value=0)
             self._progress_detail.set("Conversion cancelled")
             self._status.set("MKV to MP4 conversion was cancelled safely.")
         else:
+            _diagnostics_info(
+                "MKV to MP4 conversion completed", output=str(result.output)
+            )
             self._completed_output = result.output
             self._progress.configure(mode="determinate", maximum=100, value=100)
             self._progress_detail.set("Conversion complete")
@@ -372,6 +424,7 @@ class MkvToMp4Dialog:
         self._cancel_event.set()
         self._cancel_button.configure(state=tk.DISABLED)
         self._status.set("Cancellation requested; waiting for FFmpeg to stop safely…")
+        _diagnostics_info("MKV to MP4 cancellation requested")
 
     def _open_output_folder(self) -> None:
         """Open the folder containing the completed MP4."""
@@ -432,6 +485,7 @@ class MediaToVideoApp:
         self._scan_result: ScanResult | None = None
         self._busy_operation: str | None = None
         self._log_line_count = 0
+        self._ready_announced = False
 
         self._source = tk.StringVar()
         self._output = tk.StringVar()
@@ -450,6 +504,12 @@ class MediaToVideoApp:
         self._source.trace_add("write", self._source_or_grouping_changed)
         self._grouping.trace_add("write", self._source_or_grouping_changed)
         self._root.protocol("WM_DELETE_WINDOW", self._on_close)
+        # Tk callback failures have no console in a windowed build.
+        self._root.report_callback_exception = self._report_callback_exception
+        # The window is only "running" once it has actually mapped and drawn.
+        self._root.bind("<Map>", self._announce_ready, add="+")
+        self._root.bind("<Configure>", self._announce_ready, add="+")
+        self._root.after_idle(self._announce_ready)
         self._root.after(100, self._poll_messages)
 
     def _configure_window(self) -> None:
@@ -590,6 +650,9 @@ class MediaToVideoApp:
         ttk.Button(
             controls, text="Open output folder", command=self._open_output
         ).grid(row=0, column=5, padx=(8, 0))
+        ttk.Button(
+            controls, text="Open diagnostic log", command=self._open_diagnostic_log
+        ).grid(row=0, column=6, padx=(8, 0))
 
         status = ttk.Label(
             outer,
@@ -742,6 +805,8 @@ class MediaToVideoApp:
             except ScanCancelled:
                 self._queue_message(("scan_cancelled",))
             except Exception as error:  # Surface unexpected filesystem errors.
+                # Logged here, at the catch, so queue delivery never duplicates it.
+                _diagnostics_exception("Scanning source failed", error)
                 self._queue_message(("operation_error", "Scanning source", error))
             else:
                 self._queue_message(("scan_done", result))
@@ -799,6 +864,8 @@ class MediaToVideoApp:
                     cancel_event=self._cancel_event,
                 )
             except Exception as error:  # Includes missing dependencies.
+                # Logged here, at the catch, so queue delivery never duplicates it.
+                _diagnostics_exception("Converting videos failed", error)
                 self._queue_message(("operation_error", "Converting videos", error))
             else:
                 self._queue_message(("conversion_done", summary))
@@ -1051,8 +1118,12 @@ class MediaToVideoApp:
             return
         self._messages.put(message)
 
-    def _append_log(self, text: str) -> None:
-        """Append one readable line to the persistent activity log."""
+    def _append_log(self, text: str, mirror: bool = True) -> None:
+        """Append one readable line to the activity log and the diagnostic file.
+
+        ``mirror`` is False for a line that is written to the file separately
+        with extra structured fields, so it is never recorded twice.
+        """
 
         # Trim oldest lines so long runs do not grow the text buffer forever.
         while self._log_line_count >= _MAX_LOG_LINES:
@@ -1066,6 +1137,88 @@ class MediaToVideoApp:
         self._log.see(tk.END)
         self._log.configure(state=tk.DISABLED)
         self._log_line_count += 1
+        # Mirror the same line to the persistent log the user can open.
+        if mirror:
+            _diagnostics_info(text)
+
+    @property
+    def ready_announced(self) -> bool:
+        """True once the window really mapped and the ready line was logged."""
+
+        return self._ready_announced
+
+    def _announce_ready(self, _event: object = None) -> None:
+        """Log the canonical running line after the window is really drawn."""
+
+        if self._ready_announced or not self._interface_is_drawn():
+            return
+        self._ready_announced = True
+        path = _diagnostics_log_path()
+        recovery = _diagnostics_recovery_text()
+        self._append_log(_READY_MESSAGE, mirror=False)
+        self._append_log(
+            f"Diagnostic log: {path}" if path else "Diagnostic log unavailable."
+        )
+        if recovery:
+            self._append_log(recovery)
+        _diagnostics_info(
+            _READY_MESSAGE,
+            log=str(path) if path else None,
+            tk=self._tk_patchlevel(),
+            python=sys.version.split()[0],
+        )
+
+    def _tk_patchlevel(self) -> str:
+        """Return the Tk version reported by the real window.
+
+        The runtime check and the bundle self-test ask Tk the same way, so the
+        ready record reports the same value they validate.
+        """
+
+        try:
+            return str(self._root.tk.call("package", "require", "Tk"))
+        except Exception:  # noqa: BLE001 - report the fallback rather than fail
+            return str(getattr(tk, "TkVersion", "unknown"))
+
+    def _interface_is_drawn(self) -> bool:
+        """True once the real window and its main controls are on screen."""
+
+        try:
+            return bool(self._root.winfo_viewable()) and self._scan_button.winfo_width() > 1
+        except tk.TclError:
+            return False
+
+    def _report_callback_exception(
+        self, exc_type: Any, exc_value: Any, _exc_traceback: Any
+    ) -> None:
+        """Log and show a failed Tk callback instead of losing it in a console."""
+
+        error = exc_value if isinstance(exc_value, BaseException) else exc_type
+        _diagnostics_exception("Interface callback failed", error)
+        details = error_messages_format_operation("Running the interface", error)
+        try:
+            self._append_log(details)
+            messagebox.showerror("Application error", details)
+        except tk.TclError:
+            return
+
+    def _open_diagnostic_log(self) -> None:
+        """Open the diagnostic log without touching any running conversion."""
+
+        try:
+            opened = diagnostics.diagnostics_open_log()
+        except Exception as error:  # noqa: BLE001 - the control must stay safe
+            _diagnostics_exception("Opening the diagnostic log failed", error)
+            opened = False
+        if opened:
+            path = _diagnostics_log_path()
+            self._status.set(f"Opened diagnostic log: {path or 'this session'}")
+            self._append_log(f"Opened diagnostic log: {path or 'this session'}")
+            return
+        recovery = _diagnostics_recovery_text()
+        self._status.set(f"The diagnostic log is unavailable. {recovery}")
+        self._append_log(f"Diagnostic log unavailable. {recovery}")
+        messagebox.showwarning("Diagnostic log", recovery)
 
     def _clear_group_table(self) -> None:
         """Remove all stale rows from the scan preview."""
@@ -1084,6 +1237,9 @@ class MediaToVideoApp:
             return
         if self._busy_operation:
             self._cancel_event.set()
+        self._append_log(
+            f"Application window closing (running operation: {self._busy_operation or 'none'})."
+        )
         self._root.destroy()
 
 

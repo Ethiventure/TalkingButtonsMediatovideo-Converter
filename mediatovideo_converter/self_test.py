@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -37,7 +38,8 @@ def _self_test_gui() -> dict[str, Any]:
                 labels[str(widget.cget('text'))] = widget
             except tk.TclError:
                 continue
-        expected = ('Source', 'Output', '1. Scan source', '2. Convert videos')
+        expected = ('Source', 'Output', '1. Scan source', '2. Convert videos',
+                    'Open diagnostic log')
         for label in expected:
             widget = labels.get(label)
             if widget is None or not widget.winfo_viewable() or widget.winfo_width() <= 1:
@@ -88,14 +90,43 @@ def self_test_main(report_path: Path | None = None) -> int:
     """Write a machine-readable result; callers impose an overall GUI deadline."""
     from . import __version__
     from .runtime import runtime_check
+    from .diagnostics import diagnostics_start, diagnostics_info, diagnostics_log_path, diagnostics_exception
 
     report: dict[str, Any] = {'version': __version__, 'python': sys.version, 'frozen': bool(getattr(sys, 'frozen', False)), 'path': os.environ.get('PATH', ''), 'ok': False}
+    diagnostics_start()
+    session_marker = uuid.uuid4().hex
+    diagnostics_info('Application startup', version=__version__, mode='self-test',
+                     self_test_id=session_marker)
     try:
-        runtime_check()
+        runtime_report = runtime_check()
+        diagnostics_info('Runtime compatibility check passed', **runtime_report)
         report['gui'] = _self_test_gui()
         report['video'] = _self_test_video()
+        video_tools = report['video']['tools']['tools']
+        diagnostics_info('Video tools verified',
+                         ffmpeg_version=video_tools['ffmpeg']['version'],
+                         ffprobe_version=video_tools['ffprobe']['version'])
+        diagnostics_info('Generated video self-test passed', **report['video'])
+        log_path = diagnostics_log_path()
+        if log_path is None:
+            raise RuntimeError('The diagnostic log could not be created during the self-test.')
+        saved_log = log_path.read_text(encoding='utf-8')
+        # Restrict checks to this test's marker so an earlier successful launch
+        # cannot mask missing readiness or version records in the current run.
+        marker_index = saved_log.find(session_marker)
+        if marker_index < 0:
+            raise RuntimeError('The diagnostic log is missing this self-test session.')
+        saved_log = saved_log[saved_log.rfind('\n', 0, marker_index) + 1:]
+        for marker in ('Application startup', 'Application window initialized',
+                       __version__, str(runtime_report['python_version']),
+                       str(report['gui']['tk'])):
+            if marker not in saved_log:
+                raise RuntimeError(f'The diagnostic log is missing {marker!r}.')
+        report['diagnostics'] = {'log_path': str(log_path), 'startup_logged': True,
+                                 'gui_ready_logged': True, 'runtime_versions_logged': True}
         report['ok'] = True
     except Exception as error:
+        diagnostics_exception('Application self-test failed', error)
         report['error'] = f'{type(error).__name__}: {error}'
     result = json.dumps(report, indent=2)
     if report_path:

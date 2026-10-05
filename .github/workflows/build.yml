@@ -144,6 +144,12 @@ jobs:
           assert report.get("ok") is True, f"self-test did not pass: {report}"
           assert report.get("frozen") is True, f"self-test did not run frozen: {report}"
           assert not report.get("path"), f"self-test saw an inherited PATH entry: {report.get('path')!r}"
+          diagnostics = report.get("diagnostics") or {}
+          assert diagnostics.get("startup_logged") is True, f"missing startup log: {report}"
+          assert diagnostics.get("gui_ready_logged") is True, f"missing GUI-ready log: {report}"
+          assert diagnostics.get("runtime_versions_logged") is True, f"missing runtime versions in log: {report}"
+          log_path = pathlib.Path(diagnostics["log_path"])
+          assert log_path.is_file(), f"diagnostic log not saved: {log_path}"
           video = report.get("video") or {}
           paths = []
           if isinstance(video, dict):

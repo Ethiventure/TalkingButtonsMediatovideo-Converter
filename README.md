@@ -37,6 +37,59 @@ probe and release smoke tests detect startup/widget failures, but do not prove
 that every native file chooser or menu workflow is unaffected. Bundling fixes
 which packages are used; OS-specific dialog behavior still needs testing.
 
+## Diagnostic logs and startup status
+
+Every normal application start creates or appends to a UTF-8 diagnostic log.
+It records the application version, Python and loaded Tk versions, runtime and
+FFmpeg checks, scan/conversion activity, errors with tracebacks, and shutdown.
+The main window has an **Open diagnostic log** button. You can also locate the
+active log without opening the GUI:
+
+```sh
+python run_app.py --log-path
+```
+
+For a packaged app, use its native executable in place of `python run_app.py`.
+The usual log locations are:
+
+| Platform | Diagnostic log |
+| --- | --- |
+| macOS | `~/Library/Logs/Mediatovideo Converter/application-debug.log` |
+| Windows | `%LOCALAPPDATA%\Mediatovideo Converter\Logs\application-debug.log` |
+| Linux/source testing | `$XDG_STATE_HOME/mediatovideo-converter/application-debug.log`, or `~/.local/state/mediatovideo-converter/application-debug.log` |
+
+If the normal location is unwritable, the app tries a temporary log location
+and reports the path it actually uses. Failure to write a log does not prevent
+startup. Logs rotate to keep disk usage bounded; collect the current log and
+its numbered backups soon after reproducing an issue. The log can include
+local file paths and FFmpeg error details, so review it before sharing it.
+It contains no media contents or full environment dump.
+
+Double-clicking `run_macos.command` or `run_windows.bat` keeps a startup terminal
+visible. Source runs also mirror diagnostic messages to that terminal;
+windowed packages always save them to the log. After the main window has been
+drawn, the diagnostic status says:
+
+> Application window initialized; the application should be running now.
+
+The source terminal and diagnostic log also show the log location and runtime
+guidance. For a
+source checkout, use stable **Python 3.14.8 or newer**, with **Tk 9.1.0 or newer
+on macOS** or **Tk 9.0.4 or newer on Windows**. Tkinter is Python's interface to
+Tk; the reported Tk patchlevel is the drawing toolkit version actually loaded.
+If the source window is blank or fails to open, rerun the launcher so it can
+check or upgrade those prerequisites, then collect the diagnostic log.
+
+The self-contained app carries its own Python and Tk. If that app has a problem,
+update or reinstall the application package and attach its log; changing system
+Python or Tk does not change the bundled runtime. A startup failure shows a
+native error dialog with the log location even if Tk cannot open the GUI.
+A ready message confirms window initialization, not every later interaction.
+
+To report an issue, reproduce it once, copy the current diagnostic log (and
+relevant rotated backups), and include the app version, operating system,
+whether you used the package or source launcher, and what you clicked.
+
 ## Real application screenshots
 
 These are screenshots of the actual macOS application, not interface renders.
@@ -356,4 +409,5 @@ python run_app.py --self-test --self-test-report build/self-test.json
 
 For a native app, substitute its executable for `python run_app.py`. Always
 impose an overall timeout when automating GUI smoke tests; the release workflow
-does so. Windowed startup failures are also written to a per-user startup log.
+does so. Windowed startup failures are written to `application-debug.log`; see the
+diagnostic log instructions above.

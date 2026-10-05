@@ -2,6 +2,17 @@
 
 All notable changes to Mediatovideo Converter are recorded here.
 
+## [0.4.1] - 2026-10-05
+
+### Added
+
+- Persistent rotating diagnostic logs for startup, loaded runtime/tool versions,
+  GUI readiness, activity, errors, and exception tracebacks.
+- An Open diagnostic log action in the main window and a `--log-path` CLI.
+- Terminal startup status and recovery guidance that distinguishes source
+  Python/Tk updates from updating a self-contained application package.
+- Logging regression tests and native smoke checks that verify the saved log.
+
 ## [0.4.0] - 2026-10-05
 
 - Validate the Windows distribution as a real ZIP before upload.

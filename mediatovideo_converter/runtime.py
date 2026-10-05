@@ -14,7 +14,6 @@ have ``sys.stdout`` set to ``None``. Standard library only, parseable by Python
 
 from __future__ import annotations
 
-import datetime
 import json
 import os
 import platform as platform_module
@@ -35,6 +34,14 @@ RUNTIME_MIN_TK_DEFAULT: Tuple[int, int, int] = (8, 6, 0)
 RUNTIME_PROBE_TIMEOUT_SECONDS: float = 20.0
 RUNTIME_PROBE_REPORT_FLAG: str = "--runtime-probe-report"
 _HINT = "Start the app with run_macos.command or run_windows.bat so the launcher can "
+# Constant AppleScript: the failure text arrives as argv, so newlines, quotes and
+# backslashes in a block can never break out of the dialog source.
+RUNTIME_APPLESCRIPT_DIALOG: str = (
+    "on run argv\n"
+    'display dialog (item 1 of argv) buttons {"OK"} default button "OK" '
+    'with title "Mediatovideo Converter cannot start"\n'
+    "end run"
+)
 
 
 def runtime_is_frozen() -> bool:
@@ -107,44 +114,84 @@ def runtime_error_text(stage: str, problem: str, action: str, details: str = "")
 
 
 def runtime_log_failure(text: str) -> Optional[Path]:
-    """Append a startup failure to the per-user log and return its path."""
-    if sys.platform.startswith("darwin"):
-        path = Path.home() / "Library" / "Logs" / "Mediatovideo Converter" / "startup-error.log"
-    elif sys.platform.startswith("win"):
-        base = Path(os.environ.get("LOCALAPPDATA") or str(Path.home()))
-        path = base / "Mediatovideo Converter" / "Logs" / "startup-error.log"
-    else:
-        base = Path(os.environ.get("XDG_STATE_HOME") or str(Path.home() / ".local" / "state"))
-        path = base / "mediatovideo-converter" / "startup-error.log"
-    stamp = datetime.datetime.now().astimezone().isoformat(timespec="seconds")
+    """Write a runtime failure to the diagnostic log and return its path."""
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write("\n[{}]\n{}\n".format(stamp, text.rstrip()))
-    except OSError:
+        from . import diagnostics
+
+        diagnostics.diagnostics_start()
+        diagnostics.diagnostics_exception(str(text).rstrip())
+        return diagnostics.diagnostics_log_path()
+    except Exception:  # noqa: BLE001 - failure reporting must never raise
         return None
-    return path
 
 
-def runtime_report_failure(failure: object) -> Optional[Path]:
-    """Print a failure block and, when frozen, log it and show a dialog."""
-    text = str(failure)
-    print(text, file=sys.stderr)
-    if not runtime_is_frozen():
-        return None
-    path = runtime_log_failure(text)
-    if path:
-        print("Details: failure recorded in {}".format(path), file=sys.stderr)
+def runtime_failure_message(text: str) -> str:
+    """Append the actual log path and recovery guidance to a failure block.
+
+    The guidance comes from the diagnostics module, which builds it from
+    ``runtime_get_requirements()``: a source checkout is told which Python/Tk
+    versions to install, while a frozen application is told to reinstall or
+    update the packaged app. The log path is always included so a windowed
+    dialog can point at the file even with no terminal.
+    """
+    advice = ""
+    try:
+        from . import diagnostics
+
+        diagnostics.diagnostics_start()
+        advice = diagnostics.diagnostics_recovery_text()
+    except Exception:  # noqa: BLE001 - fall back to a minimal recovery note
+        advice = ""
+    if not advice:
+        requirements = runtime_get_requirements()
+        if runtime_is_frozen():
+            advice = (
+                "Install the latest packaged application version again from a "
+                "fresh download and try once more; the diagnostic log could not "
+                "be created."
+            )
+        else:
+            advice = (
+                "Install or update Python {}+ and Tk {}+, then run the launcher "
+                "again; the diagnostic log could not be created."
+            ).format(requirements["python_text"], requirements["tk_text"])
+    return "{}\nRecovery advice: {}".format(str(text).rstrip(), advice)
+
+
+def runtime_show_failure_dialog(text: str) -> bool:
+    """Show the native windowed failure dialog on macOS/Windows (best effort).
+
+    macOS passes the complete failure block as an osascript argument to a
+    constant script, so multi-line text and quoting characters are transported
+    verbatim instead of being interpolated into AppleScript source. Windows uses
+    the blocking MessageBoxW call as before.
+    """
     try:
         if sys.platform.startswith("darwin"):
-            escaped = text.replace("\\", "\\\\").replace('"', '\\"')
-            runtime_run_probe(["/usr/bin/osascript", "-e", 'display dialog "{}" buttons {{"OK"}}'.format(escaped)], 15.0)
-        elif sys.platform.startswith("win"):
+            subprocess.Popen(
+                ["/usr/bin/osascript", "-e", RUNTIME_APPLESCRIPT_DIALOG, str(text)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            return True
+        if sys.platform.startswith("win"):
             import ctypes
 
             ctypes.windll.user32.MessageBoxW(0, text, "Mediatovideo Converter cannot start", 0x40)
-    except Exception:
-        pass
+            return True
+    except Exception:  # noqa: BLE001 - a dialog is best effort
+        return False
+    return False
+
+
+def runtime_report_failure(failure: object) -> Optional[Path]:
+    """Report a runtime failure to the terminal, the log and any frozen dialog."""
+    text = runtime_failure_message(str(failure))
+    if sys.stderr is not None:
+        print(text, file=sys.stderr)
+    path = runtime_log_failure(text)
+    if runtime_is_frozen():
+        runtime_show_failure_dialog(text)
     return path
 
 

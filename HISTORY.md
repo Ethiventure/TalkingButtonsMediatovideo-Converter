@@ -71,3 +71,12 @@ project history.
 - Replaced the Windows archive command after downloaded artifact inspection
   found TAR contents behind a ZIP filename. The workflow now creates a real
   ZIP and validates its integrity and application executable before upload.
+
+## 2026-10-05 — Version 0.4.1 diagnostic logging
+
+- Added a bounded persistent diagnostic log, early exception capture, and
+  saved GUI/conversion activity for debugging blank windows and failed jobs.
+- Added a log-opening control and startup/readiness messages with actual
+  package versions, log location, and source-versus-package recovery advice.
+- Documented log collection in README and extended the integrated harness and
+  native frozen smoke tests to verify diagnostic output.

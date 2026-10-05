@@ -18,6 +18,7 @@ if str(_SCRIPT_DIRECTORY) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIRECTORY))
 
 from mediatovideo_converter import runtime  # noqa: E402
+from mediatovideo_converter import diagnostics  # noqa: E402
 
 
 def run_app_parser() -> argparse.ArgumentParser:
@@ -36,6 +37,8 @@ def run_app_parser() -> argparse.ArgumentParser:
     parser.add_argument("--self-test", action="store_true", help="run the bundle self test and exit")
     parser.add_argument("--self-test-report", metavar="PATH", default=None,
                         help="write the self-test JSON report to PATH (implies --self-test)")
+    parser.add_argument("--log-path", action="store_true",
+                        help="print the active diagnostic log path without opening the GUI")
     return parser
 
 
@@ -44,8 +47,10 @@ def run_app_check_runtime() -> int:
     try:
         payload = runtime.runtime_check()
     except runtime.RuntimeUnsupportedError as error:
+        diagnostics.diagnostics_exception("Runtime compatibility check failed", error)
         print(str(error), file=sys.stderr)
         return 1
+    diagnostics.diagnostics_info("Runtime compatibility check passed", **payload)
     print("OK: Compatible Python and Tkinter found\nPython: {} at {}\nTk: {}\n"
           "GUI widgets: Treeview and Progressbar created and drawn".format(
               payload.get("python_version"), payload.get("python_executable"),
@@ -71,19 +76,27 @@ def run_app_video_tools() -> Tuple[int, str]:
         )
     try:
         ffmpeg, ffprobe = converter_find_tools()
-        converter_verify_tools(ffmpeg, ffprobe)
+        report = converter_verify_tools(ffmpeg, ffprobe)
     except (FFmpegNotFoundError, FFmpegCompatibilityError) as error:
+        diagnostics.diagnostics_exception("Video tool compatibility check failed", error)
         return 1, str(error).strip()
+    tools = report.get("tools", {})
+    diagnostics.diagnostics_info(
+        "Video tools verified", ffmpeg=ffmpeg, ffprobe=ffprobe,
+        ffmpeg_version=tools.get("ffmpeg", {}).get("version", "unknown"),
+        ffprobe_version=tools.get("ffprobe", {}).get("version", "unknown"),
+        features=report.get("features", {}))
     return 0, ""
 
 
 def run_app_launch_gui() -> int:
     """Verify the runtime and video tools, then launch the GUI."""
     try:
-        runtime.runtime_check()
+        payload = runtime.runtime_check()
     except runtime.RuntimeUnsupportedError as error:
         runtime.runtime_report_failure(error)
         return 2
+    diagnostics.diagnostics_info("Runtime compatibility check passed", **payload)
     status, failure = run_app_video_tools()
     if status != 0:
         runtime.runtime_report_failure(failure)
@@ -104,8 +117,7 @@ def run_app_launch_gui() -> int:
         )
         return 2
     from mediatovideo_converter import __version__
-    if sys.stdout:
-        print(f"Mediatovideo Converter {__version__}")
+    diagnostics.diagnostics_info("Opening application window", version=__version__)
     web_ui_main()
     return 0
 
@@ -134,18 +146,42 @@ def run_app_main(argv: Optional[Sequence[str]] = None) -> int:
         return runtime.runtime_probe_main()
     if args.runtime_probe_report:
         return runtime.runtime_probe_main([runtime.RUNTIME_PROBE_REPORT_FLAG, args.runtime_probe_report])
-    if args.self_test or args.self_test_report:
-        return run_app_self_test(args.self_test_report)
-    if args.check_runtime:
-        return run_app_check_runtime()
-    if args.check_video_tools:
-        status, failure = run_app_video_tools()
-        if status != 0:
-            print(failure, file=sys.stderr)
+    diagnostics.diagnostics_start()
+    diagnostics.diagnostics_install_exception_hooks()
+    from mediatovideo_converter import __version__
+    diagnostics.diagnostics_info("Application startup", version=__version__)
+    diagnostics.diagnostics_info(diagnostics.diagnostics_recovery_text())
+    status = 1
+    try:
+        if args.log_path:
+            path = diagnostics.diagnostics_log_path()
+            if sys.stdout is not None:
+                print(str(path) if path else "Diagnostic log unavailable: no writable location.")
+            status = 0 if path else 1
+        elif args.self_test or args.self_test_report:
+            status = run_app_self_test(args.self_test_report)
+        elif args.check_runtime:
+            status = run_app_check_runtime()
+        elif args.check_video_tools:
+            status, failure = run_app_video_tools()
+            if status != 0:
+                runtime.runtime_report_failure(failure)
+            else:
+                diagnostics.diagnostics_info("OK: Compatible FFmpeg and FFprobe found")
         else:
-            print("OK: Compatible FFmpeg and FFprobe found")
-        return status
-    return run_app_launch_gui()
+            status = run_app_launch_gui()
+    except Exception as error:
+        # Import failures and root-construction errors occur before Tk can show
+        # its own dialog. The native failure reporter works independently of Tk.
+        diagnostics.diagnostics_exception("Unexpected application failure", error)
+        runtime.runtime_report_failure(runtime.runtime_error_text(
+            "Starting the application", "The application stopped unexpectedly.",
+            diagnostics.diagnostics_recovery_text(), f"{type(error).__name__}: {error}"))
+        status = 2
+    finally:
+        diagnostics.diagnostics_info("Application exit", status=status)
+        diagnostics.diagnostics_shutdown()
+    return status
 
 
 if __name__ == "__main__":
