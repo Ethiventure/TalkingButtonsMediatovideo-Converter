@@ -346,6 +346,13 @@ one preview picture per stretch in `review/thumbs/`, and a summary in
 `review/analysis.json`. Open the pictures, delete or fix any wrong rows in
 the CSV.
 
+Review like this (same for any talking-button video):
+
+* Quote spaced paths: `"My Videos/JoinedDay.mp4"`. Without quotes a spaced name fails.
+* Check unsure rows first: any row with confidence under 0.70 is the detector guessing — look at those preview pictures before the rest.
+* Check deleted stretches too, not just kept rows: long deleted gaps can hide a miss. Open `review/gaps/` first — sample pictures from each long gap, listed in `review/deleted.csv` (tune with `--gap-review`). For anything unsure, open `review/frames/` (one photo every few seconds; frame name to time is `(number − 1) × seconds-per-frame`) and look around that time. Every frame's score lives in `review/hits.csv`.
+* Hidden dogs read as deleted: a dog curled asleep in a bed or box looks like shadow — the detector only trusts a clear out-in-the-open shape. Pick a rule before exporting: cut sleeping as not interesting, or add those stretches back to the CSV by hand (the file grows).
+
 Step 2 — build the dogs-only video (minutes, fast copy):
 
 ```sh
@@ -353,8 +360,12 @@ Step 2 — build the dogs-only video (minutes, fast copy):
 ```
 
 Useful tweaks: `--conf 0.3` keeps more (and risks more), `--every 1` checks
-twice as often, `--handles 4` widens the calm edges, `--model` points at a
-bigger detector. On macOS replace `/opt/homebrew/bin/python3` with `python3.
+twice as often, `--handles-before` / `--handles-after` set the calm seconds
+each side (defaults 8 before, 3 after — the long lead-in keeps entrances;
+`--handles 4` still sets both at once), `--model` points at a
+bigger detector. On macOS replace `/opt/homebrew/bin/python3` with `python3`.
+
+Small print: export never overwrites — move an old `dogs-only.mp4` first. Fast-copy cuts land on the nearest clean cut point, so the finished video can run slightly longer than the kept-seconds sum. `review/` folders hold absolute local paths plus room stills, so keep them out of git.
 
 A proprietary, damaged, or unrecognised camera stream cannot be repaired merely
 by changing its container. The source export must still contain readable media.

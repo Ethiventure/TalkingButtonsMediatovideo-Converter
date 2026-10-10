@@ -2,6 +2,33 @@
 
 Newest first. Plain everyday words, nothing dumbed down.
 
+## 2026-10-10 — Longer lead-in before each kept part
+
+Kept parts now start 8 seconds before the first dog sighting instead of 3,
+so entrances are never cut; the tail stays at 3. One knob became two
+(`--handles-before` / `--handles-after`) so each side tunes alone;
+`--handles` still sets both at once. Applies to new analyzes only — old
+review lists keep their baked-in edges unless re-run.
+
+## 2026-10-10 — Dog detector misses back-of-head, nose-down, half-out dogs
+
+A clear side view scores ~0.55 and is kept. Back of the head with nose down
+sniffing, or a dog half out of the picture at the frame edge, scores 0.00
+and is deleted — same family as the sleeping-in-a-bed miss. Lowering the
+keep threshold was rejected (it floods the list with junk). The fix keeps
+review as the safety net but tools it up: analyze now saves every frame's
+score with its file name (`hits.csv`) and sample pictures for each long
+deleted stretch (`gaps/` + `deleted.csv`, tuned with `--gap-review`).
+
+## 2026-10-08 — Dog detector sees clear dogs, not sleeping-in-house
+
+The YOLO dog check looks for a clear dog shape out in the open. It skips
+a puppy curled dark inside the wicker house (frames 003296 and 006581).
+That is why two long blocks read as deleted even though she is there.
+Rule we chose: keep active dog, cut house-sleeping and empty room as not
+interesting. If the rule flips to keep every second on screen, those blocks
+must be added back by hand and the file grows by ~2 hours.
+
 ## 2026-10-05 — Check sound by decoding, never by listing tracks
 
 A file can list a sound track and still play silence. Twice now the probe

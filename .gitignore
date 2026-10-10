@@ -7,3 +7,6 @@ dist/
 *.spec
 *.egg-info/
 .coverage
+# Dog-filter review workdirs hold absolute local paths + room stills — never commit.
+review-2021/
+review-*/

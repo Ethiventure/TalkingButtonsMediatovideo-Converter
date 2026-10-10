@@ -300,8 +300,7 @@ One leftover dead function was deleted.
 
 Technical: 32 tracked files; repo-wide searches for names, usernames, and
 local/temp paths return zero; `git log -S` clean; `.venv` (1.1 GB) ignored.
-Removed `_converter_demux_group` (unused since the per-clip rewrite) and the
-`"Nietzsche videos"` test fixture (now `"Camera exports"`). Kept upstream
+Removed `_converter_demux_group` (unused since the per-clip rewrite) and a personal year-video folder name used as a test fixture (now `"Camera exports"`). Kept upstream
 `JaredReabow` provenance (public, not personal). Playback demos for the owner
 live outside the repo: `littlelf-test-with-sound.mp4`,
 `joined-3-events-demo.mp4`, `littlelf-mixed-8clips-test.mp4`,

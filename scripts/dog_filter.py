@@ -3,7 +3,8 @@
 Local-only two-step workflow (nothing is uploaded, originals never change):
 
   1. analyze: sample frames, run a small YOLO detector, write a reviewable
-     segments.csv with preview pictures.
+     segments.csv with preview pictures, every frame's score in hits.csv,
+     and check pictures for long deleted stretches.
   2. export:  build the dogs-only video from the reviewed list (fast copy).
 
 Run with the repo sandbox (needs ultralytics there)::
@@ -68,6 +69,18 @@ def stamp(seconds: float) -> str:
     return f"{seconds // 3600}:{(seconds % 3600) // 60:02d}:{seconds % 60:02d}"
 
 
+def widen_segments(segments: list[dict], before: float, after: float,
+                   duration: float) -> list[dict]:
+    """Add calm handles each side of every segment, clamped to the video."""
+
+    return [
+        {"start": max(0.0, seg["start"] - before),
+         "end": min(duration, seg["end"] + after),
+         "best": seg["best"]}
+        for seg in segments
+    ]
+
+
 def cmd_analyze(args: argparse.Namespace) -> None:
     """Sample frames, detect dogs, and write a reviewable segment list."""
 
@@ -111,6 +124,13 @@ def cmd_analyze(args: argparse.Namespace) -> None:
             found = sum(1 for hit in hits if hit["conf"] >= args.conf)
             print(f"  ...{index}/{len(frames)} frames, dog so far in {found}")
 
+    hits_path = out / "hits.csv"
+    with hits_path.open("w", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["frame", "t", "conf"])
+        for frame, hit in zip(frames, hits):
+            writer.writerow([frame.name, f'{hit["t"]:.2f}', f'{hit["conf"]:.3f}'])
+
     # Merge nearby hits into segments, then widen each with calm handles.
     segments: list[dict] = []
     open_start: float | None = None
@@ -126,11 +146,12 @@ def cmd_analyze(args: argparse.Namespace) -> None:
             segments.append({"start": open_start, "end": previous, "best": open_best})
             open_start = None
             open_best = 0.0
+    before = args.handles_before if args.handles_before is not None else (
+        args.handles if args.handles is not None else 8.0)
+    after = args.handles_after if args.handles_after is not None else (
+        args.handles if args.handles is not None else 3.0)
     segments = [
-        {"start": max(0.0, seg["start"] - args.handles),
-         "end": min(duration, seg["end"] + args.handles),
-         "best": seg["best"]}
-        for seg in segments
+        seg for seg in widen_segments(segments, before, after, duration)
         if seg["end"] - seg["start"] >= args.min_len
     ]
     # Re-join segments whose new handles now touch.
@@ -141,6 +162,28 @@ def cmd_analyze(args: argparse.Namespace) -> None:
             joined[-1]["best"] = max(joined[-1]["best"], seg["best"])
         else:
             joined.append(seg)
+
+    gaps_dir = out / "gaps"
+    gaps_dir.mkdir(exist_ok=True)
+    deleted_path = out / "deleted.csv"
+    with deleted_path.open("w", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["n", "start", "end", "duration", "samples"])
+        gap_count = 0
+        edges = [0.0] + [mark for seg in joined for mark in (seg["start"], seg["end"])] + [duration]
+        for gap_start, gap_end in zip(edges[0::2], edges[1::2]):
+            if gap_end - gap_start >= args.gap_review:
+                gap_count += 1
+                thumbs: list[str] = []
+                for part, frac in enumerate((0.25, 0.5, 0.75), start=1):
+                    target = gap_start + (gap_end - gap_start) * frac
+                    nearest = min(frames, key=lambda frame: abs(
+                        (int(frame.stem.split("_")[1]) - 1) * args.every - target))
+                    name = f"gap_{gap_count:03d}_{part}.jpg"
+                    shutil.copy(nearest, gaps_dir / name)
+                    thumbs.append(name)
+                writer.writerow([gap_count, f"{gap_start:.2f}", f"{gap_end:.2f}",
+                                 f"{gap_end - gap_start:.1f}", ";".join(thumbs)])
 
     thumbs_dir = out / "thumbs"
     thumbs_dir.mkdir(exist_ok=True)
@@ -177,6 +220,9 @@ def cmd_analyze(args: argparse.Namespace) -> None:
     print(f"\nReview {csv_path.name} and the pictures in {thumbs_dir.name}/, "
           f"delete or fix any rows, then run:\n"
           f"  .venv/bin/python scripts/dog_filter.py export {source} {csv_path} --out dogs.mp4")
+    print(f"Every frame's score is in {hits_path.name} (frame name, time, "
+          f"confidence). Long deleted stretches have check pictures in "
+          f"{gaps_dir.name}/, listed in {deleted_path.name}.")
 
 
 def cmd_export(args: argparse.Namespace) -> None:
@@ -234,8 +280,16 @@ def main(argv: list[str]) -> None:
                          help="join hits this close in seconds (default 10)")
     analyze.add_argument("--min-len", type=float, default=2.0,
                          help="drop kept parts shorter than this (default 2s)")
-    analyze.add_argument("--handles", type=float, default=3.0,
-                         help="calm seconds added each side (default 3)")
+    analyze.add_argument("--handles", type=float, default=None,
+                         help="calm seconds added each side; overridden per side by "
+                              "--handles-before/--handles-after")
+    analyze.add_argument("--handles-before", type=float, default=None,
+                         help="calm seconds added before each kept part (default 8)")
+    analyze.add_argument("--handles-after", type=float, default=None,
+                         help="calm seconds added after each kept part (default 3)")
+    analyze.add_argument("--gap-review", type=float, default=120.0,
+                         help="deleted stretches at/over this length get check "
+                              "pictures (default 120s)")
     analyze.add_argument("--model", default=str(
         Path.home() / ".cache" / "dog_filter" / "yolov8s.pt"),
         help="detector weights (downloaded once on first run)")
