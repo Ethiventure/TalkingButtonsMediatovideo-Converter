@@ -1,5 +1,7 @@
 # Mediatovideo Converter
 
+This fork is an AI coded add-on for videos of my dogs using talking buttons. It did what I needed it to and might be helpful for similar use cases. 
+
 Mediatovideo Converter is a simple Windows and macOS desktop application for
 combining camera `.media` clips into usable video files. It expands the
 [original FFmpeg concat gist](https://gist.github.com/priintpar/f7a56af8977206e9f45b486f767b02ac)
